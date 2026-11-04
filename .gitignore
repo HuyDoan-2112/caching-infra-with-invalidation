@@ -1,0 +1,19 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets
+.env
+
+# Go
+bin/
+*.exe
+*.test
+*.out
+
+# Java
+target/
+build/
+.gradle/
+*.class
