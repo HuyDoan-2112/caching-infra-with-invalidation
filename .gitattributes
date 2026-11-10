@@ -1,0 +1,3 @@
+# Store and check out text files with LF line endings, on every OS.
+# Config, SQL and shell files are mounted into Linux containers, where CRLF breaks them.
+* text=auto eol=lf
