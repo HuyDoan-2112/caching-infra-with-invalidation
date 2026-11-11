@@ -1,4 +1,4 @@
-// Package mysqldb opens the MySQL connection pool used by the writer and reader.
+// Command invalidator consumes binlog change events and deletes stale cache keys (not built yet).
 package main
 
 import "fmt"

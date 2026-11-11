@@ -1,3 +1,6 @@
+-- Runs once, as root, when the MySQL data volume is empty.
+-- The `app` user and its ALL PRIVILEGES on `catalog` come from MYSQL_USER / MYSQL_DATABASE.
+
 CREATE DATABASE IF NOT EXISTS catalog
     CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
@@ -15,9 +18,8 @@ CREATE TABLE IF NOT EXISTS items(
     KEY idx_items_updated_at (updated_at)
 ) ENGINE=InnoDB;
 
--- Permissions Debezium needs to read the binlog. Dev only
-GRANT SELECT, RELOAD, SHOW DATABASES,
-      REPLICATION SLAVE, REPLICATION CLIENT, LOCK TABLES
-  ON *.* TO 'app'@'%';
-GRANT ALL PRIVILEGES ON catalog.* TO 'app'@'%';
-FLUSH PRIVILEGES;
+-- Debezium reads the binlog with its own user, so the services' `app` user
+-- holds no replication privileges. Dev-only password.
+CREATE USER IF NOT EXISTS 'debezium'@'%' IDENTIFIED BY 'debezium';
+GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT, LOCK TABLES
+  ON *.* TO 'debezium'@'%';

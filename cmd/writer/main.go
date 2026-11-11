@@ -9,9 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/health"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/httpserver"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
 )
@@ -56,21 +56,7 @@ func run(log *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
-	// healthz: the process is alive. No dependencies, so it never fails while we run
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-	// readyz: we can serve traffic right now, which needs MySQL.
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		pingCtx, cancel := context.WithTimeout(r.Context(), time.Second)
-		defer cancel()
-		if err := db.PingContext(pingCtx); err != nil {
-			log.Warn("not ready", "err", err)
-			http.Error(w, "mysql unreachable", http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte("ready"))
-	})
+	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
 
 	return httpserver.Run(ctx, ln, mux, log)
 }
