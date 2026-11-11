@@ -35,7 +35,7 @@ tools:
 	cp .env.example .env
 
 up: .env
-	$(COMPOSE) up -d --wait
+	$(COMPOSE) up -d --wait --build
 
 down:
 	$(COMPOSE) down
