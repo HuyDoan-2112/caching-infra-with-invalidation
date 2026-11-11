@@ -1,3 +1,5 @@
+// Package httpserver runs an http.Server until its context is cancelled,
+// then lets in-flight requests finish before returning.
 package httpserver
 
 import (

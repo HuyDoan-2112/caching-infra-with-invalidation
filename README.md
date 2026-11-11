@@ -66,28 +66,40 @@ cdc-cache-invalidation/
 ├── internal/             Shared Go packages used by the programs above
 │                         (Go forbids importing these from outside this module)
 ├── deploy/               Docker Compose and infrastructure config
-│   └── docker-compose.yml
+│   ├── docker-compose.yml
+│   └── mysql/            MySQL image with binlog settings, and the schema
 ├── docs/
 │   └── adr/              Architecture Decision Records: why each design choice was made
+├── .github/workflows/    CI: `make check` and a Compose smoke test
+├── Dockerfile            Builds any program: --build-arg SERVICE=writer|reader|invalidator
+├── Makefile              Developer commands: check, up, down, run-writer, tools
 ├── go.mod                Go module definition
 └── README.md
 ```
 
 ## Status
 
-Early work in progress. The project structure is in place, and the services are still
-placeholders.
+Work in progress. The writer (`:8080`) and reader (`:8081`) start, connect to MySQL, and
+answer health checks (`/healthz`, `/readyz`). The item API, the Redis cache, and
+binlog-driven invalidation are not built yet.
 
 ## How to run
 
-Prerequisites: Go 1.27+, Docker with Compose v2.
+Prerequisites: Go 1.27+, Docker with Compose v2, make.
 
 ```bash
-# start MySQL
-docker compose -f deploy/docker-compose.yml up -d
+make up                          # build images, start MySQL, Redis, writer, reader
+curl localhost:8080/readyz       # writer: "ready" once MySQL is reachable
+curl localhost:8081/readyz       # reader
+make down                        # stop everything (data is kept in volumes)
+```
 
-# build all programs
-go build ./...
+Development:
+
+```bash
+make tools                       # once: install the pinned linter and load tester
+make check                       # formatting, vet, lint, tests with the race detector
+make run-writer                  # run the writer on your machine against the Compose MySQL
 ```
 
 ## Acknowledgements
