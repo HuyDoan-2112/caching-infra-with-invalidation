@@ -38,6 +38,58 @@ services:
       timeout: 3s
       retries: 20
 
+  writer:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SERVICE: writer
+    image: cdc-writer:dev
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      WRITER_PORT: "8080"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
+    ports:
+      - "${WRITER_HOST_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  reader:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SERVICE: reader
+    image: cdc-reader:dev
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      READER_PORT: "8081"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
+    ports:
+      - "${READER_HOST_PORT:-8081}:8081"
+    healthcheck:
+      test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:8081/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
 volumes:
   mysql-data:
   redis-data:

@@ -1,0 +1,12 @@
+# Lint rules for `make lint` / `make check`. Docs: https://golangci-lint.run/docs/configuration/
+version: "2"
+
+linters:
+  # The "standard" set stays on: errcheck, govet, ineffassign, staticcheck, unused.
+  enable:
+    - bodyclose     # HTTP response bodies must be closed (tests, clients)
+    - errorlint     # compare errors with errors.Is / errors.As, wrap with %w
+    - misspell      # common English typos in comments and strings
+    - revive        # Go style: doc comments on packages and exported names
+    - rowserrcheck  # check rows.Err() after a rows.Next() loop
+    - sqlclosecheck # close sql.Rows and sql.Stmt, or the pool leaks connections

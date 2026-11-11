@@ -1,3 +1,4 @@
+// Command writer serves the item write API (health checks so far).
 package main
 
 import (
@@ -38,7 +39,13 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer db.Close() // runs after Run returns: requests are drained before the pool closes
+
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Warn("closing mysql pool", "err", err)
+		}
+	}() // runs after Run returns: requests are drained before the pool closes
+
 	log.Info("mysql connected",
 		"addr", net.JoinHostPort(cfg.MySQL.Host, cfg.MySQL.Port),
 		"max_open_conns", cfg.MySQL.MaxOpenConns)
@@ -50,7 +57,7 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	// healthz: the process is alive. No dependencies, so it never fails while we run
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	// readyz: we can serve traffic right now, which needs MySQL.

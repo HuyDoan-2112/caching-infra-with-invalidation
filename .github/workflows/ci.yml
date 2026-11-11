@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch or PR cancels the run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: make check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Put installed tools on PATH
+        run: echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - run: make tools
+      - run: make check
+
+  compose:
+    name: compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start the stack (waits for every healthcheck)
+        run: make up
+      - name: Services answer
+        run: |
+          curl -sf localhost:8080/readyz
+          curl -sf localhost:8081/readyz
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --env-file .env -f deploy/docker-compose.yml logs
+      - name: Tear down
+        if: always()
+        run: make down
