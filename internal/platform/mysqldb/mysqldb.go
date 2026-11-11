@@ -33,6 +33,9 @@ func Open(ctx context.Context, cfg Config) (*sql.DB, error) {
 	dc.ParseTime = true // TIMESTAMP columns scan into time.Time, not []byte
 	dc.Loc = time.UTC
 	dc.Params = map[string]string{"time_zone": "'+00:00'"} // session in UTC, whatever the server default
+	// RowsAffected counts matched rows, not changed rows. Without it, a PUT that sends
+	// the values a row already has reports 0 rows and would be mistaken for a 404.
+	dc.ClientFoundRows = true
 
 	connector, err := mysql.NewConnector(dc)
 	if err != nil {

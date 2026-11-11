@@ -55,6 +55,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
       MYSQL_USER: ${MYSQL_USER:-app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
     ports:
       - "${WRITER_HOST_PORT:-8080}:8080"
     healthcheck:
@@ -80,6 +81,7 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-catalog}
       MYSQL_USER: ${MYSQL_USER:-app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
     ports:
       - "${READER_HOST_PORT:-8081}:8081"
     healthcheck:
