@@ -99,6 +99,7 @@ Development:
 ```bash
 make tools                       # once: install the pinned linter and load tester
 make check                       # formatting, vet, lint, tests with the race detector
+make test-integration            # also the API tests against the Compose MySQL (after make up)
 make run-writer                  # run the writer on your machine against the Compose MySQL
 ```
 

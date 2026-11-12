@@ -5,7 +5,7 @@ HEY_VERSION           := v0.1.4
 COMPOSE               := docker compose --env-file .env -f deploy/docker-compose.yml
 
 .DEFAULT_GOAL := check
-.PHONY: check fmt fmt-check vet lint test tools up down run-writer
+.PHONY: check fmt fmt-check vet lint test test-integration tools up down run-writer
 
 # check runs everything CI runs: formatting, vet, lint, tests with the race detector.
 check: fmt-check vet lint test
@@ -25,6 +25,10 @@ lint:
 
 test:
 	go test -race ./...
+
+# test-integration also runs the tests tagged `integration`, against the Compose MySQL (`make up` first).
+test-integration: .env
+	set -a && . ./.env && set +a && go test -race -count=1 -tags integration ./...
 
 # tools installs pinned dev tools into $(go env GOPATH)/bin.
 tools:
