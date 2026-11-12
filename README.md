@@ -79,9 +79,10 @@ cdc-cache-invalidation/
 
 ## Status
 
-Work in progress. The writer (`:8080`) and reader (`:8081`) start, connect to MySQL, and
-answer health checks (`/healthz`, `/readyz`). The item API, the Redis cache, and
-binlog-driven invalidation are not built yet.
+Work in progress. The writer (`:8080`) serves `POST /api/v1/items` and
+`PUT`/`DELETE /api/v1/items/{id}`; the reader (`:8081`) serves `GET /api/v1/items/{id}`,
+straight from MySQL for now. Both answer health checks (`/healthz`, `/readyz`).
+The Redis cache and binlog-driven invalidation are not built yet.
 
 ## How to run
 

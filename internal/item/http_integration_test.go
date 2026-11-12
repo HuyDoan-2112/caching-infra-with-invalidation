@@ -48,7 +48,14 @@ func TestMain(m *testing.M) {
 // newMux returns the writer's routes backed by the real database.
 func newMux() http.Handler {
 	mux := http.NewServeMux()
-	item.NewHandler(item.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Register(mux)
+	return mux
+}
+
+// newReaderMux returns the reader's routes backed by the real database.
+func newReaderMux() http.Handler {
+	mux := http.NewServeMux()
+	item.NewReadHandler(item.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Register(mux)
 	return mux
 }
 
@@ -291,6 +298,89 @@ func TestMethodNotAllowed(t *testing.T) {
 	} {
 		if rec := do(t, h, tc.method, tc.path, ""); rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s %s = %d, want 405", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestGet(t *testing.T) {
+	writer, reader := newMux(), newReaderMux()
+
+	t.Run("returns what the writer stored", func(t *testing.T) {
+		created := create(t, writer, `{"name":"Bàn phím","description":"87 phím","price_cents":0,"currency":"VND","stock":0}`)
+		rec := do(t, reader, http.MethodGet, itemPath(created.ID), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body)
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		got := decodeItem(t, rec)
+		if got.ID != created.ID || got.Name != created.Name || *got.Description != *created.Description ||
+			got.PriceCents != created.PriceCents || got.Currency != created.Currency || *got.Stock != *created.Stock ||
+			!got.CreatedAt.Equal(created.CreatedAt) || !got.UpdatedAt.Equal(created.UpdatedAt) {
+			t.Errorf("GET = %+v, want %+v", got, created)
+		}
+	})
+
+	t.Run("null fields stay null", func(t *testing.T) {
+		created := create(t, writer, `{"name":"x","price_cents":1,"currency":"USD"}`)
+		got := decodeItem(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""))
+		if got.Description != nil || got.Stock != nil {
+			t.Errorf("description, stock = %v, %v, want nil, nil", got.Description, got.Stock)
+		}
+	})
+
+	t.Run("sees the latest write", func(t *testing.T) {
+		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
+		if rec := do(t, writer, http.MethodPut, itemPath(created.ID), `{"name":"after","price_cents":2,"currency":"USD"}`); rec.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d, want 200", rec.Code)
+		}
+		if got := decodeItem(t, do(t, reader, http.MethodGet, itemPath(created.ID), "")); got.Name != "after" || got.PriceCents != 2 {
+			t.Errorf("GET after PUT = %+v, want name \"after\", price 2", got)
+		}
+	})
+}
+
+func TestGetRejects(t *testing.T) {
+	writer, reader := newMux(), newReaderMux()
+	missing := missingID(t, writer)
+
+	tests := []struct {
+		name   string
+		path   string
+		status int
+		code   string
+	}{
+		{"missing item", itemPath(missing), 404, "not_found"},
+		{"id not a number", "/api/v1/items/abc", 400, "invalid_id"},
+		{"id zero", "/api/v1/items/0", 400, "invalid_id"},
+		{"id negative", "/api/v1/items/-1", 400, "invalid_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wantError(t, do(t, reader, http.MethodGet, tt.path, ""), tt.status, tt.code)
+		})
+	}
+}
+
+// TestServicesOnlyServeTheirOwnRoutes pins the read/write split: the reader
+// never writes and the writer never serves item reads.
+func TestServicesOnlyServeTheirOwnRoutes(t *testing.T) {
+	writer, reader := newMux(), newReaderMux()
+	for _, tc := range []struct {
+		name   string
+		h      http.Handler
+		method string
+		path   string
+		want   int
+	}{
+		{"writer has no GET by id", writer, http.MethodGet, "/api/v1/items/1", http.StatusMethodNotAllowed},
+		{"reader has no PUT", reader, http.MethodPut, "/api/v1/items/1", http.StatusMethodNotAllowed},
+		{"reader has no DELETE", reader, http.MethodDelete, "/api/v1/items/1", http.StatusMethodNotAllowed},
+		{"reader has no POST", reader, http.MethodPost, "/api/v1/items", http.StatusNotFound},
+	} {
+		if rec := do(t, tc.h, tc.method, tc.path, `{}`); rec.Code != tc.want {
+			t.Errorf("%s: %s %s = %d, want %d", tc.name, tc.method, tc.path, rec.Code, tc.want)
 		}
 	}
 }

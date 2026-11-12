@@ -52,6 +52,12 @@ func get(ctx context.Context, q queryer, id int64) (*Item, error) {
 	return &it, nil
 }
 
+// Get reads item id. It returns an error wrapping ErrNotFound if no item has
+// that id.
+func (s *Store) Get(ctx context.Context, id int64) (*Item, error) {
+	return get(ctx, s.db, id)
+}
+
 // writeAndRead runs write in a transaction, reads back the item whose id
 // write returns, and commits. Create and Update differ only in write.
 func (s *Store) writeAndRead(ctx context.Context, write func(tx *sql.Tx) (int64, error)) (*Item, error) {

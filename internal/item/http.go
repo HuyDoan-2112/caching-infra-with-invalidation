@@ -1,6 +1,7 @@
 package item
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,22 +13,68 @@ import (
 // maxBodyBytes caps request bodies; a full item is well under 10 KB.
 const maxBodyBytes = 64 << 10
 
-// Handler serves the item write API over HTTP.
-type Handler struct {
+// WriteHandler serves the item write API (the writer service).
+type WriteHandler struct {
 	store *Store
 	log   *slog.Logger
 }
 
-// NewHandler returns a Handler that saves items in store and logs failures to log.
-func NewHandler(store *Store, log *slog.Logger) *Handler {
-	return &Handler{store: store, log: log}
+// NewWriteHandler returns a WriteHandler that saves items in store and logs
+// failures to log.
+func NewWriteHandler(store *Store, log *slog.Logger) *WriteHandler {
+	return &WriteHandler{store: store, log: log}
 }
 
-// Register adds the item routes to mux.
-func (h *Handler) Register(mux *http.ServeMux) {
+// Register adds the write routes to mux.
+func (h *WriteHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/items", h.create)
 	mux.HandleFunc("PUT /api/v1/items/{id}", h.update)
 	mux.HandleFunc("DELETE /api/v1/items/{id}", h.delete)
+}
+
+// Getter looks up one item by id, returning an error wrapping ErrNotFound if
+// there is none. *Store implements it; the reader's cache will wrap it.
+type Getter interface {
+	Get(ctx context.Context, id int64) (*Item, error)
+}
+
+// ReadHandler serves the item read API (the reader service).
+type ReadHandler struct {
+	items Getter
+	log   *slog.Logger
+}
+
+// NewReadHandler returns a ReadHandler that looks items up in items and logs
+// failures to log.
+func NewReadHandler(items Getter, log *slog.Logger) *ReadHandler {
+	return &ReadHandler{items: items, log: log}
+}
+
+// Register adds the read routes to mux.
+func (h *ReadHandler) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/v1/items/{id}", h.get)
+}
+
+// get handles GET /api/v1/items/{id}: reply 200 with the item.
+func (h *ReadHandler) get(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseID(w, r)
+	if !ok {
+		return
+	}
+
+	it, err := h.items.Get(r.Context(), id)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// A client mistake, not a server problem: no log.
+		writeError(w, http.StatusNotFound, "not_found", "item not found", nil)
+		return
+	case err != nil:
+		h.log.Error("get item", "id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "internal error", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, it)
 }
 
 // errorBody is the JSON shape of every error response:
@@ -58,7 +105,7 @@ func writeError(w http.ResponseWriter, status int, code, message string, fields 
 
 // create handles POST /api/v1/items: decode, validate, insert, then reply
 // 201 with the stored item and a Location header.
-func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
+func (h *WriteHandler) create(w http.ResponseWriter, r *http.Request) {
 	in, ok := decodeInput(w, r)
 	if !ok {
 		return
@@ -79,7 +126,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 
 // update handles PUT /api/v1/items/{id}: replace every field of the item, then
 // reply 200 with the stored item. Fields left out of the body become null.
-func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
+func (h *WriteHandler) update(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
 		return
@@ -105,7 +152,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 
 // delete handles DELETE /api/v1/items/{id}: remove the item, then reply 204
 // with no body.
-func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+func (h *WriteHandler) delete(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseID(w, r)
 	if !ok {
 		return

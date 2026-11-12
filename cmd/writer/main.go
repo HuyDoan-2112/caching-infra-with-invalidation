@@ -58,7 +58,7 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
-	item.NewHandler(item.NewStore(db), log).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)
 }
