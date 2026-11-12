@@ -32,12 +32,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
       - name: Start the stack (waits for every healthcheck)
         run: make up
       - name: Services answer
         run: |
           curl -sf localhost:8080/readyz
           curl -sf localhost:8081/readyz
+      - name: Integration tests against the Compose MySQL
+        run: make test-integration
       - name: Logs on failure
         if: failure()
         run: docker compose --env-file .env -f deploy/docker-compose.yml logs

@@ -1,4 +1,4 @@
-// Command writer serves the item write API (health checks so far).
+// Command writer serves the item write API: create, replace, and delete items in MySQL.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/health"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/httpserver"
@@ -57,6 +58,7 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
+	item.NewWriteHandler(item.NewStore(db), log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)
 }

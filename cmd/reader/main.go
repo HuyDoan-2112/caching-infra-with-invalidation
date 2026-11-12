@@ -1,4 +1,4 @@
-// Command reader serves item reads (straight from MySQL for now).
+// Command reader serves item reads: GET /api/v1/items/{id}, straight from MySQL for now.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/health"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/httpserver"
@@ -57,6 +58,7 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
+	item.NewReadHandler(item.NewStore(db), log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)
 }

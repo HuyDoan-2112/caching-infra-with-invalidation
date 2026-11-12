@@ -1,6 +1,10 @@
 # Lint rules for `make lint` / `make check`. Docs: https://golangci-lint.run/docs/configuration/
 version: "2"
 
+run:
+  build-tags:
+    - integration # also lint the integration tests, which `go build` skips without the tag
+
 linters:
   # The "standard" set stays on: errcheck, govet, ineffassign, staticcheck, unused.
   enable:
