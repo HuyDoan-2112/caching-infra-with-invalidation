@@ -1,6 +1,6 @@
 //go:build integration
 
-// Integration tests for the item HTTP API against a real MySQL.
+// Integration tests for the item HTTP API against a real MySQL and Redis.
 // Run with `make test-integration` (needs `make up` first).
 
 package item_test
@@ -19,14 +19,24 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
 
-// db is shared by every test: one pool, opened once in TestMain.
-var db *sql.DB
+// db and rdb are shared by every test: one pool each, opened once in TestMain.
+var (
+	db  *sql.DB
+	rdb *redis.Client
+)
+
+// testTTL is the reader cache TTL in tests; tests check the key expires within it.
+const testTTL = time.Minute
 
 func TestMain(m *testing.M) {
 	cfg, err := config.Load("WRITER_PORT", "8080")
@@ -34,30 +44,50 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	// Fail loudly: asking for integration tests means MySQL and Redis must be there.
 	db, err = mysqldb.Open(context.Background(), cfg.MySQL)
 	if err != nil {
-		// Fail loudly: asking for integration tests means MySQL must be there.
 		fmt.Fprintln(os.Stderr, "integration tests need MySQL (run `make up`):", err)
 		os.Exit(1)
 	}
+	rdb, err = redisdb.Open(context.Background(), cfg.Redis)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "integration tests need Redis (run `make up`):", err)
+		os.Exit(1)
+	}
 	code := m.Run()
+	_ = rdb.Close()
 	_ = db.Close()
 	os.Exit(code)
 }
 
+func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 // newMux returns the writer's routes backed by the real database.
 func newMux() http.Handler {
 	mux := http.NewServeMux()
-	item.NewWriteHandler(item.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), discardLog()).Register(mux)
 	return mux
 }
 
-// newReaderMux returns the reader's routes backed by the real database.
+// newReaderMux returns the reader's routes as in production: the Redis cache
+// in front of the real database.
 func newReaderMux() http.Handler {
+	return newReaderMuxWith(rdb)
+}
+
+// newReaderMuxWith is newReaderMux with the cache using client c.
+func newReaderMuxWith(c *redis.Client) http.Handler {
 	mux := http.NewServeMux()
-	item.NewReadHandler(item.NewStore(db), slog.New(slog.NewTextHandler(io.Discard, nil))).Register(mux)
+	cache := item.NewCache(item.NewStore(db), c, discardLog(), testTTL)
+	item.NewReadHandler(cache, discardLog()).Register(mux)
 	return mux
 }
+
+// cacheKey spells out the reader's Redis key format. It is written out here,
+// not imported, because the invalidator depends on it: changing it should
+// break a test.
+func cacheKey(id int64) string { return "v1:item:" + strconv.FormatInt(id, 10) }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -68,8 +98,8 @@ func do(t *testing.T, h http.Handler, method, path, body string) *httptest.Respo
 
 func itemPath(id int64) string { return "/api/v1/items/" + strconv.FormatInt(id, 10) }
 
-// create POSTs body, requires a 201, and deletes the row when the test ends
-// so repeated runs do not pile up rows in the dev database.
+// create POSTs body, requires a 201, and deletes the row and its cache entry
+// when the test ends so repeated runs do not pile up data in the dev stack.
 func create(t *testing.T, h http.Handler, body string) item.Item {
 	t.Helper()
 	rec := do(t, h, http.MethodPost, "/api/v1/items", body)
@@ -77,7 +107,10 @@ func create(t *testing.T, h http.Handler, body string) item.Item {
 		t.Fatalf("POST status = %d, want 201; body: %s", rec.Code, rec.Body)
 	}
 	it := decodeItem(t, rec)
-	t.Cleanup(func() { _, _ = db.Exec("DELETE FROM items WHERE id = ?", it.ID) })
+	t.Cleanup(func() {
+		_, _ = db.Exec("DELETE FROM items WHERE id = ?", it.ID)
+		_ = rdb.Del(context.Background(), cacheKey(it.ID)).Err()
+	})
 	return it
 }
 
@@ -361,6 +394,96 @@ func TestGetRejects(t *testing.T) {
 			wantError(t, do(t, reader, http.MethodGet, tt.path, ""), tt.status, tt.code)
 		})
 	}
+}
+
+// wantCache requires a 200 with the given X-Cache value and returns the item.
+func wantCache(t *testing.T, rec *httptest.ResponseRecorder, want string) item.Item {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("X-Cache"); got != want {
+		t.Fatalf("X-Cache = %q, want %q", got, want)
+	}
+	return decodeItem(t, rec)
+}
+
+func TestGetCache(t *testing.T) {
+	writer, reader := newMux(), newReaderMux()
+	ctx := context.Background()
+
+	t.Run("miss stores the item, then hits", func(t *testing.T) {
+		created := create(t, writer, `{"name":"cached","price_cents":5,"currency":"USD"}`)
+		path := itemPath(created.ID)
+
+		miss := do(t, reader, http.MethodGet, path, "")
+		wantCache(t, miss, "MISS")
+		ttl, err := rdb.TTL(ctx, cacheKey(created.ID)).Result()
+		if err != nil || ttl <= 0 || ttl > testTTL {
+			t.Fatalf("TTL after miss = %v, err = %v; want in (0, %v]", ttl, err, testTTL)
+		}
+		hit := do(t, reader, http.MethodGet, path, "")
+		wantCache(t, hit, "HIT")
+		if hit.Body.String() != miss.Body.String() {
+			t.Errorf("HIT body = %s, want the MISS body %s", hit.Body, miss.Body)
+		}
+	})
+
+	t.Run("hit does not read MySQL", func(t *testing.T) {
+		// Change the row behind the cache's back: nothing invalidates it yet
+		// (that is the CDC invalidator's job), so a hit must still serve the
+		// cached copy. Proves the hit came from Redis alone.
+		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
+		path := itemPath(created.ID)
+		wantCache(t, do(t, reader, http.MethodGet, path, ""), "MISS")
+		if _, err := db.Exec("UPDATE items SET name = 'after' WHERE id = ?", created.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got := wantCache(t, do(t, reader, http.MethodGet, path, ""), "HIT"); got.Name != "before" {
+			t.Errorf("name = %q, want the cached \"before\"", got.Name)
+		}
+	})
+
+	t.Run("not found is not cached", func(t *testing.T) {
+		id := missingID(t, writer)
+		rec := do(t, reader, http.MethodGet, itemPath(id), "")
+		wantError(t, rec, http.StatusNotFound, "not_found")
+		if got := rec.Header().Get("X-Cache"); got != "" {
+			t.Errorf("X-Cache on 404 = %q, want none", got)
+		}
+		if n, err := rdb.Exists(ctx, cacheKey(id)).Result(); err != nil || n != 0 {
+			t.Errorf("key exists = %d, err = %v; want 0", n, err)
+		}
+	})
+
+	t.Run("corrupt entry is replaced from MySQL", func(t *testing.T) {
+		created := create(t, writer, `{"name":"fresh","price_cents":1,"currency":"USD"}`)
+		if err := rdb.Set(ctx, cacheKey(created.ID), "not json", testTTL).Err(); err != nil {
+			t.Fatal(err)
+		}
+		if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "fresh" {
+			t.Errorf("name = %q, want \"fresh\" from MySQL", got.Name)
+		}
+		wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "HIT")
+	})
+
+	t.Run("redis down falls back to MySQL", func(t *testing.T) {
+		// Nothing listens on port 1; same fail-fast settings as redisdb.Open.
+		dead := redis.NewClient(&redis.Options{
+			Addr:          "localhost:1",
+			DialTimeout:   250 * time.Millisecond,
+			MaxRetries:    -1,
+			DialerRetries: 1,
+		})
+		t.Cleanup(func() { _ = dead.Close() })
+
+		created := create(t, writer, `{"name":"no cache","price_cents":1,"currency":"USD"}`)
+		for range 2 { // never a HIT: nothing can be stored
+			if got := wantCache(t, do(t, newReaderMuxWith(dead), http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "no cache" {
+				t.Errorf("name = %q, want \"no cache\"", got.Name)
+			}
+		}
+	})
 }
 
 // TestServicesOnlyServeTheirOwnRoutes pins the read/write split: the reader

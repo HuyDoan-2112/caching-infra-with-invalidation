@@ -33,20 +33,26 @@ func (h *WriteHandler) Register(mux *http.ServeMux) {
 }
 
 // Getter looks up one item by id, returning an error wrapping ErrNotFound if
-// there is none. *Store implements it; the reader's cache will wrap it.
+// there is none. *Store implements it; Cache wraps it.
 type Getter interface {
 	Get(ctx context.Context, id int64) (*Item, error)
 }
 
+// CachedGetter looks up one item by id like Getter, and also reports whether
+// it was served from the cache. *Cache implements it.
+type CachedGetter interface {
+	Get(ctx context.Context, id int64) (it *Item, hit bool, err error)
+}
+
 // ReadHandler serves the item read API (the reader service).
 type ReadHandler struct {
-	items Getter
+	items CachedGetter
 	log   *slog.Logger
 }
 
 // NewReadHandler returns a ReadHandler that looks items up in items and logs
 // failures to log.
-func NewReadHandler(items Getter, log *slog.Logger) *ReadHandler {
+func NewReadHandler(items CachedGetter, log *slog.Logger) *ReadHandler {
 	return &ReadHandler{items: items, log: log}
 }
 
@@ -62,7 +68,7 @@ func (h *ReadHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	it, err := h.items.Get(r.Context(), id)
+	it, hit, err := h.items.Get(r.Context(), id)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		// A client mistake, not a server problem: no log.
@@ -72,6 +78,11 @@ func (h *ReadHandler) get(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("get item", "id", id, "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error", nil)
 		return
+	}
+	if hit {
+		w.Header().Set("X-Cache", "HIT")
+	} else {
+		w.Header().Set("X-Cache", "MISS")
 	}
 
 	writeJSON(w, http.StatusOK, it)
