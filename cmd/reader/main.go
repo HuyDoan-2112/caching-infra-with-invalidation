@@ -1,4 +1,5 @@
-// Command reader serves item reads: GET /api/v1/items/{id}, straight from MySQL for now.
+// Command reader serves item reads: GET /api/v1/items/{id}, from MySQL with a
+// Redis cache in front (cache-aside).
 package main
 
 import (
@@ -9,13 +10,19 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/health"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/httpserver"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
+
+// cacheTTL bounds how long a cached item can be served stale if an
+// invalidation is missed.
+const cacheTTL = 10 * time.Minute
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -51,6 +58,21 @@ func run(log *slog.Logger) error {
 		"addr", net.JoinHostPort(cfg.MySQL.Host, cfg.MySQL.Port),
 		"max_open_conns", cfg.MySQL.MaxOpenConns)
 
+	// Redis must be reachable at startup, so a wrong address fails loudly here.
+	// Once running, the cache falls back to MySQL when Redis is down.
+	rdb, err := redisdb.Open(ctx, cfg.Redis)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			log.Warn("closing redis pool", "err", err)
+		}
+	}()
+
+	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port))
+
 	ln, err := net.Listen("tcp", ":"+cfg.HTTPPort)
 	if err != nil {
 		return err
@@ -58,7 +80,8 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
-	item.NewReadHandler(item.NewStore(db), log).Register(mux)
+	cache := item.NewCache(item.NewStore(db), rdb, log, cacheTTL)
+	item.NewReadHandler(cache, log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)
 }

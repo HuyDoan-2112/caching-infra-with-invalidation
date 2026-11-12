@@ -73,6 +73,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       READER_PORT: "8081"
       MYSQL_HOST: mysql
@@ -81,8 +83,10 @@ services:
       MYSQL_USER: ${MYSQL_USER:-app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app}
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
     ports:
-      - "${READER_HOST_PORT:-8081}:8081"
+      - "${READER_HOSPORT:-8081}:8081"
     healthcheck:
       test: ["CMD", "/busybox/wget", "-qO-", "http://localhost:8081/readyz"]
       interval: 5s

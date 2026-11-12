@@ -8,12 +8,14 @@ import (
 	"strconv"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
 
 // Config holds everything a service needs at startup.
 type Config struct {
 	HTTPPort string
 	MySQL    mysqldb.Config
+	Redis    redisdb.Config
 }
 
 // Load reads the environment, applies defaults, and reports every invalid
@@ -29,6 +31,11 @@ func Load(portVar, defaultPort string) (Config, error) {
 			User:     getenv("MYSQL_USER", "app"),
 			Password: getenv("MYSQL_PASSWORD", "app"),
 		},
+		Redis: redisdb.Config{
+			Host:     getenv("REDIS_HOST", "localhost"),
+			Port:     getenv("REDIS_PORT", "6379"),
+			Password: os.Getenv("REDIS_PASSWORD"), // empty means no auth
+		},
 	}
 
 	var errs []error
@@ -36,6 +43,9 @@ func Load(portVar, defaultPort string) (Config, error) {
 		errs = append(errs, err)
 	}
 	if err := checkPort("MYSQL_PORT", cfg.MySQL.Port); err != nil {
+		errs = append(errs, err)
+	}
+	if err := checkPort("REDIS_PORT", cfg.Redis.Port); err != nil {
 		errs = append(errs, err)
 	}
 
