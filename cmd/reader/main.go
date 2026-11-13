@@ -10,7 +10,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
@@ -19,10 +22,6 @@ import (
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
-
-// cacheTTL bounds how long a cached item can be served stale if an
-// invalidation is missed.
-const cacheTTL = 10 * time.Minute
 
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -71,7 +70,17 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port))
+	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port),
+		"cache_ttl", cfg.CacheTTL.String())
+
+	// Our own registry instead of Prometheus's global one: everything /metrics
+	// shows is registered here, explicitly.
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(
+		collectors.NewGoCollector(),                                       // go_*: goroutines, GC, memory
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}), // process_*: CPU, RSS, open fds
+		collectors.NewDBStatsCollector(db, cfg.MySQL.Database),            // go_sql_*: pool in use, waits
+	)
 
 	ln, err := net.Listen("tcp", ":"+cfg.HTTPPort)
 	if err != nil {
@@ -79,8 +88,11 @@ func run(log *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
+	// Redis is deliberately not a readiness check: the reader still serves
+	// correct answers from MySQL without it, so it should keep getting traffic.
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
-	cache := item.NewCache(item.NewStore(db), rdb, log, cacheTTL)
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	cache := item.NewCache(item.NewStore(db), rdb, log, cfg.CacheTTL, item.NewCacheMetrics(reg))
 	item.NewReadHandler(cache, log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)

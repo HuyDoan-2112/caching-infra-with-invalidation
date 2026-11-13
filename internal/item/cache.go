@@ -14,15 +14,16 @@ import (
 // Cache serves items from Redis, falling back to inner (MySQL) on a miss and
 // storing what it read for ttl. Redis failures are logged, never returned.
 type Cache struct {
-	inner Getter
-	rdb   *redis.Client
-	log   *slog.Logger
-	ttl   time.Duration
+	inner   Getter
+	rdb     *redis.Client
+	log     *slog.Logger
+	ttl     time.Duration
+	metrics *CacheMetrics
 }
 
 // NewCache returns a Cache in front of inner.
-func NewCache(inner Getter, rdb *redis.Client, log *slog.Logger, ttl time.Duration) *Cache {
-	return &Cache{inner: inner, rdb: rdb, log: log, ttl: ttl}
+func NewCache(inner Getter, rdb *redis.Client, log *slog.Logger, ttl time.Duration, metrics *CacheMetrics) *Cache {
+	return &Cache{inner: inner, rdb: rdb, log: log, ttl: ttl, metrics: metrics}
 }
 
 // cacheKey is the Redis key for item id. The v1 prefix is bumped whenever
@@ -40,11 +41,17 @@ func (c *Cache) Get(ctx context.Context, id int64) (*Item, bool, error) {
 
 	cached, redisOK := c.lookup(ctx, key)
 	if cached != nil {
+		c.metrics.requests.WithLabelValues("hit").Inc()
 		return cached, true, nil
 	}
 
 	it, err := c.inner.Get(ctx, id)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrNotFound):
+		c.metrics.requests.WithLabelValues("not_found").Inc()
+		return nil, false, err
+	case err != nil:
+		c.metrics.requests.WithLabelValues("error").Inc()
 		return nil, false, err
 	}
 
@@ -52,6 +59,7 @@ func (c *Cache) Get(ctx context.Context, id int64) (*Item, bool, error) {
 		c.save(ctx, key, it)
 	}
 
+	c.metrics.requests.WithLabelValues("miss").Inc()
 	return it, false, nil
 }
 
@@ -65,12 +73,13 @@ func (c *Cache) lookup(ctx context.Context, key string) (*Item, bool) {
 	}
 
 	if err != nil {
+		c.metrics.redisErrors.WithLabelValues("get").Inc()
 		c.log.Warn("redis get failed", "key", key, "err", err)
 		return nil, false
 	}
-
 	var it Item
 	if err := json.Unmarshal(b, &it); err != nil {
+		c.metrics.redisErrors.WithLabelValues("decode").Inc()
 		c.log.Warn("corrupt cache entry", "key", key, "err", err)
 		return nil, true
 	}
@@ -78,6 +87,8 @@ func (c *Cache) lookup(ctx context.Context, key string) (*Item, bool) {
 	return &it, true
 }
 
+// save stores it under key for c.ttl. Failures are logged and counted, and
+// otherwise ignored: the caller already has the item.
 func (c *Cache) save(ctx context.Context, key string, it *Item) {
 	b, err := json.Marshal(it)
 	if err != nil {
@@ -85,10 +96,9 @@ func (c *Cache) save(ctx context.Context, key string, it *Item) {
 		return
 	}
 
-	// this may store a row that changed after we read it.
-	err = c.rdb.Set(ctx, key, b, c.ttl).Err()
-	if err != nil {
+	// Known race: this may store a row that changed after we read it.
+	if err := c.rdb.Set(ctx, key, b, c.ttl).Err(); err != nil {
+		c.metrics.redisErrors.WithLabelValues("set").Inc()
 		c.log.Warn("redis set failed", "key", key, "err", err)
-		return
 	}
 }

@@ -9,9 +9,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/item"
@@ -61,8 +61,6 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func discardLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
-
 // newMux returns the writer's routes backed by the real database.
 func newMux() http.Handler {
 	mux := http.NewServeMux()
@@ -73,13 +71,15 @@ func newMux() http.Handler {
 // newReaderMux returns the reader's routes as in production: the Redis cache
 // in front of the real database.
 func newReaderMux() http.Handler {
-	return newReaderMuxWith(rdb)
+	return newReaderMuxWith(rdb, prometheus.NewRegistry())
 }
 
-// newReaderMuxWith is newReaderMux with the cache using client c.
-func newReaderMuxWith(c *redis.Client) http.Handler {
+// newReaderMuxWith is newReaderMux with the cache using client c and
+// registering its metrics in reg. Each call needs its own reg: registering
+// the same metric twice panics.
+func newReaderMuxWith(c *redis.Client, reg prometheus.Registerer) http.Handler {
 	mux := http.NewServeMux()
-	cache := item.NewCache(item.NewStore(db), c, discardLog(), testTTL)
+	cache := item.NewCache(item.NewStore(db), c, discardLog(), testTTL, item.NewCacheMetrics(reg))
 	item.NewReadHandler(cache, discardLog()).Register(mux)
 	return mux
 }
@@ -409,10 +409,18 @@ func wantCache(t *testing.T, rec *httptest.ResponseRecorder, want string) item.I
 }
 
 func TestGetCache(t *testing.T) {
-	writer, reader := newMux(), newReaderMux()
+	writer := newMux()
 	ctx := context.Background()
 
+	// newReader returns a reader with its own metrics registry, so each subtest
+	// sees only its own counts.
+	newReader := func(c *redis.Client) (http.Handler, *prometheus.Registry) {
+		reg := prometheus.NewRegistry()
+		return newReaderMuxWith(c, reg), reg
+	}
+
 	t.Run("miss stores the item, then hits", func(t *testing.T) {
+		reader, reg := newReader(rdb)
 		created := create(t, writer, `{"name":"cached","price_cents":5,"currency":"USD"}`)
 		path := itemPath(created.ID)
 
@@ -427,12 +435,15 @@ func TestGetCache(t *testing.T) {
 		if hit.Body.String() != miss.Body.String() {
 			t.Errorf("HIT body = %s, want the MISS body %s", hit.Body, miss.Body)
 		}
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 1, "miss": 1, "not_found": 0, "error": 0})
+		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 0, "decode": 0})
 	})
 
 	t.Run("hit does not read MySQL", func(t *testing.T) {
 		// Change the row behind the cache's back: nothing invalidates it yet
 		// (that is the CDC invalidator's job), so a hit must still serve the
 		// cached copy. Proves the hit came from Redis alone.
+		reader, reg := newReader(rdb)
 		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
 		path := itemPath(created.ID)
 		wantCache(t, do(t, reader, http.MethodGet, path, ""), "MISS")
@@ -442,9 +453,11 @@ func TestGetCache(t *testing.T) {
 		if got := wantCache(t, do(t, reader, http.MethodGet, path, ""), "HIT"); got.Name != "before" {
 			t.Errorf("name = %q, want the cached \"before\"", got.Name)
 		}
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 1, "miss": 1})
 	})
 
 	t.Run("not found is not cached", func(t *testing.T) {
+		reader, reg := newReader(rdb)
 		id := missingID(t, writer)
 		rec := do(t, reader, http.MethodGet, itemPath(id), "")
 		wantError(t, rec, http.StatusNotFound, "not_found")
@@ -454,9 +467,11 @@ func TestGetCache(t *testing.T) {
 		if n, err := rdb.Exists(ctx, cacheKey(id)).Result(); err != nil || n != 0 {
 			t.Errorf("key exists = %d, err = %v; want 0", n, err)
 		}
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 0, "miss": 0, "not_found": 1, "error": 0})
 	})
 
 	t.Run("corrupt entry is replaced from MySQL", func(t *testing.T) {
+		reader, reg := newReader(rdb)
 		created := create(t, writer, `{"name":"fresh","price_cents":1,"currency":"USD"}`)
 		if err := rdb.Set(ctx, cacheKey(created.ID), "not json", testTTL).Err(); err != nil {
 			t.Fatal(err)
@@ -465,25 +480,68 @@ func TestGetCache(t *testing.T) {
 			t.Errorf("name = %q, want \"fresh\" from MySQL", got.Name)
 		}
 		wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "HIT")
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 1, "miss": 1})
+		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 0, "decode": 1})
 	})
 
 	t.Run("redis down falls back to MySQL", func(t *testing.T) {
-		// Nothing listens on port 1; same fail-fast settings as redisdb.Open.
-		dead := redis.NewClient(&redis.Options{
-			Addr:          "localhost:1",
-			DialTimeout:   250 * time.Millisecond,
-			MaxRetries:    -1,
-			DialerRetries: 1,
-		})
-		t.Cleanup(func() { _ = dead.Close() })
-
+		reader, reg := newReader(deadRedis(t))
 		created := create(t, writer, `{"name":"no cache","price_cents":1,"currency":"USD"}`)
 		for range 2 { // never a HIT: nothing can be stored
-			if got := wantCache(t, do(t, newReaderMuxWith(dead), http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "no cache" {
+			if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "no cache" {
 				t.Errorf("name = %q, want \"no cache\"", got.Name)
 			}
 		}
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 0, "miss": 2})
+		// Both GETs failed; neither request tried a SET.
+		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 2, "set": 0, "decode": 0})
 	})
+
+	t.Run("failed SET still serves the item", func(t *testing.T) {
+		// Redis answers GETs but every SET fails: the reader must still reply
+		// 200 from MySQL, count the failure, and leave nothing in Redis.
+		hook := &failSetHook{}
+		failing := redis.NewClient(rdb.Options())
+		failing.AddHook(hook)
+		t.Cleanup(func() { _ = failing.Close() })
+		reader, reg := newReader(failing)
+
+		created := create(t, writer, `{"name":"unsaved","price_cents":1,"currency":"USD"}`)
+		for range 2 { // the SET never lands, so the second read misses too
+			if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "unsaved" {
+				t.Errorf("name = %q, want \"unsaved\"", got.Name)
+			}
+		}
+		if n, err := rdb.Exists(ctx, cacheKey(created.ID)).Result(); err != nil || n != 0 {
+			t.Errorf("key exists = %d, err = %v; want 0", n, err)
+		}
+		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 0, "miss": 2})
+		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 2, "decode": 0})
+		// One SET per miss: a second SET would double the Redis writes.
+		if hook.sets != 2 {
+			t.Errorf("SET commands sent = %d, want 2 (one per miss)", hook.sets)
+		}
+	})
+}
+
+// failSetHook makes every Redis SET fail, leaving other commands untouched,
+// and counts how many SETs the client tried to send.
+type failSetHook struct{ sets int }
+
+func (*failSetHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *failSetHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "set" {
+			h.sets++
+			return errors.New("injected SET failure")
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (*failSetHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 // TestServicesOnlyServeTheirOwnRoutes pins the read/write split: the reader
