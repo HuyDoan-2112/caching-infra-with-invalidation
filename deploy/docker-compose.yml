@@ -85,6 +85,7 @@ services:
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-16}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      CACHE_TTL: ${CACHE_TTL:-10m}
     ports:
       - "${READER_HOSPORT:-8081}:8081"
     healthcheck:

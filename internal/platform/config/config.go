@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
@@ -16,6 +17,7 @@ type Config struct {
 	HTTPPort string
 	MySQL    mysqldb.Config
 	Redis    redisdb.Config
+	CacheTTL time.Duration
 }
 
 // Load reads the environment, applies defaults, and reports every invalid
@@ -55,6 +57,13 @@ func Load(portVar, defaultPort string) (Config, error) {
 		errs = append(errs, fmt.Errorf("DB_MAX_OPEN_CONNS=%q must be an integer >= 1", raw))
 	}
 	cfg.MySQL.MaxOpenConns = n
+
+	rawTTL := getenv("CACHE_TTL", "10m")
+	ttl, err := time.ParseDuration(rawTTL)
+	if err != nil || ttl <= 0 {
+		errs = append(errs, fmt.Errorf("CACHE_TTL=%q must be a duration > 0, like 10m or 30s", rawTTL))
+	}
+	cfg.CacheTTL = ttl
 
 	return cfg, errors.Join(errs...) // nil when errs is empty
 }
