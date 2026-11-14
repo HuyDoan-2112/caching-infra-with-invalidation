@@ -11,6 +11,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// invalidateTimeout bounds one DEL. The write is already committed, so a slow
+// Redis must not hold up the response for long.
+const invalidateTimeout = 500 * time.Millisecond
+
 // Cache serves items from Redis, falling back to inner (MySQL) on a miss and
 // storing what it read for ttl. Redis failures are logged, never returned.
 type Cache struct {
@@ -24,6 +28,39 @@ type Cache struct {
 // NewCache returns a Cache in front of inner.
 func NewCache(inner Getter, rdb *redis.Client, log *slog.Logger, ttl time.Duration, metrics *CacheMetrics) *Cache {
 	return &Cache{inner: inner, rdb: rdb, log: log, ttl: ttl, metrics: metrics}
+}
+
+// Invalidator drops cached copies of an item after a write.
+type Invalidator interface {
+	Invalidate(ctx context.Context, id int64)
+}
+
+// RedisInvalidator invalidates items by deleting their reader cache keys.
+type RedisInvalidator struct {
+	rdb *redis.Client
+	log *slog.Logger
+}
+
+// NewRedisInvalidator returns a RedisInvalidator that deletes keys in rdb and
+// logs failures to log.
+func NewRedisInvalidator(rdb *redis.Client, log *slog.Logger) *RedisInvalidator {
+	return &RedisInvalidator{rdb: rdb, log: log}
+}
+
+// Invalidate deletes item id's cache key. It runs even if ctx is cancelled
+// (the client hung up after the commit), bounded by invalidateTimeout.
+// Failures are logged, not returned: MySQL already has the change, and the
+// stale copy expires with its TTL.
+func (r *RedisInvalidator) Invalidate(ctx context.Context, id int64) {
+	key := cacheKey(id)
+
+	ctx = context.WithoutCancel(ctx)
+	ctx, cancel := context.WithTimeout(ctx, invalidateTimeout)
+	defer cancel()
+
+	if err := r.rdb.Del(ctx, key).Err(); err != nil {
+		r.log.Warn("redis del failed", "key", key, "err", err)
+	}
 }
 
 // cacheKey is the Redis key for item id. The v1 prefix is bumped whenever

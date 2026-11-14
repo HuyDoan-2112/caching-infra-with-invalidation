@@ -64,7 +64,7 @@ func TestMain(m *testing.M) {
 // newMux returns the writer's routes backed by the real database.
 func newMux() http.Handler {
 	mux := http.NewServeMux()
-	item.NewWriteHandler(item.NewStore(db), discardLog()).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), item.NewRedisInvalidator(rdb, discardLog()), discardLog()).Register(mux)
 	return mux
 }
 
@@ -440,9 +440,9 @@ func TestGetCache(t *testing.T) {
 	})
 
 	t.Run("hit does not read MySQL", func(t *testing.T) {
-		// Change the row behind the cache's back: nothing invalidates it yet
-		// (that is the CDC invalidator's job), so a hit must still serve the
-		// cached copy. Proves the hit came from Redis alone.
+		// Change the row behind the cache's back: a direct SQL change goes
+		// around the writer's DEL, so a hit must still serve the cached copy.
+		// Proves the hit came from Redis alone.
 		reader, reg := newReader(rdb)
 		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
 		path := itemPath(created.ID)
@@ -564,4 +564,63 @@ func TestServicesOnlyServeTheirOwnRoutes(t *testing.T) {
 			t.Errorf("%s: %s %s = %d, want %d", tc.name, tc.method, tc.path, rec.Code, tc.want)
 		}
 	}
+}
+
+func TestWriteInvalidatesCache(t *testing.T) {
+	writer := newMux()
+	reader := newReaderMux()
+	ctx := context.Background()
+
+	// warm caches item id through the reader and proves it is really cached,
+	// so the test below starts from "Redis holds a copy".
+	warm := func(t *testing.T, id int64) {
+		t.Helper()
+		wantCache(t, do(t, reader, http.MethodGet, itemPath(id), ""), "MISS")
+		wantCache(t, do(t, reader, http.MethodGet, itemPath(id), ""), "HIT")
+	}
+
+	// wantNoKey requires that Redis holds no copy of item id.
+	wantNoKey := func(t *testing.T, id int64) {
+		t.Helper()
+		n, err := rdb.Exists(ctx, cacheKey(id)).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("cache key %s still exists after the write", cacheKey(id))
+		}
+	}
+
+	t.Run("PUT drops the cached copy", func(t *testing.T) {
+		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
+		warm(t, created.ID)
+
+		rec := do(t, writer, http.MethodPut, itemPath(created.ID),
+			`{"name":"after","price_cents":1,"currency":"USD"}`)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT status = %d, want 200; body: %s", rec.Code, rec.Body)
+		}
+
+		wantNoKey(t, created.ID)
+
+		got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS")
+		if got.Name != "after" {
+			t.Errorf("name = %q, want \"after\"", got.Name)
+		}
+	})
+
+	t.Run("DELETE drops the cached copy", func(t *testing.T) {
+		created := create(t, writer, `{"name":"doomed","price_cents":1,"currency":"USD"}`)
+		warm(t, created.ID)
+
+		rec := do(t, writer, http.MethodDelete, itemPath(created.ID), "")
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("DELETE status = %d, want 204; body: %s", rec.Code, rec.Body)
+		}
+
+		wantNoKey(t, created.ID)
+
+		wantError(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), http.StatusNotFound, "not_found")
+	})
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/health"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/httpserver"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
 
 func main() {
@@ -51,6 +52,21 @@ func run(log *slog.Logger) error {
 		"addr", net.JoinHostPort(cfg.MySQL.Host, cfg.MySQL.Port),
 		"max_open_conns", cfg.MySQL.MaxOpenConns)
 
+	// Redis must be reachable at startup, so a wrong address fails loudly here.
+	// Once running, a failed DEL is logged and the write still succeeds.
+	rdb, err := redisdb.Open(ctx, cfg.Redis)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if err := rdb.Close(); err != nil {
+			log.Warn("closing redis pool", "err", err)
+		}
+	}()
+
+	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port))
+
 	ln, err := net.Listen("tcp", ":"+cfg.HTTPPort)
 	if err != nil {
 		return err
@@ -58,7 +74,7 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
-	item.NewWriteHandler(item.NewStore(db), log).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), item.NewRedisInvalidator(rdb, log), log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)
 }
