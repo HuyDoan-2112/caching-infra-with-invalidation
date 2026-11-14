@@ -1,4 +1,5 @@
-// Package redisdb opens the Redis connection pool used by the reader's cache.
+// Package redisdb opens the Redis connection pool used by the reader's cache
+// and the writer's invalidation.
 package redisdb
 
 import (
@@ -27,9 +28,10 @@ func Open(ctx context.Context, cfg Config) (*redis.Client, error) {
 		Password: cfg.Password,
 
 		// Redis is a cache in front of MySQL: when it is slow or down, the
-		// reader should give up quickly and read MySQL instead. The defaults
-		// (5s timeouts, 3 command retries, 5 dial attempts) would make a
-		// request wait seconds before falling back.
+		// reader should give up quickly and read MySQL instead, and the writer
+		// should not hold up a committed write. The defaults (5s timeouts,
+		// 3 command retries, 5 dial attempts) would make a request wait
+		// seconds before falling back.
 		DialTimeout:   250 * time.Millisecond,
 		ReadTimeout:   200 * time.Millisecond,
 		WriteTimeout:  200 * time.Millisecond,

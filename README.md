@@ -80,9 +80,16 @@ cdc-cache-invalidation/
 ## Status
 
 Work in progress. The writer (`:8080`) serves `POST /api/v1/items` and
-`PUT`/`DELETE /api/v1/items/{id}`; the reader (`:8081`) serves `GET /api/v1/items/{id}`,
-straight from MySQL for now. Both answer health checks (`/healthz`, `/readyz`).
-The Redis cache and binlog-driven invalidation are not built yet.
+`PUT`/`DELETE /api/v1/items/{id}`. The reader (`:8081`) serves `GET /api/v1/items/{id}`
+through a Redis cache (cache-aside, TTL from `CACHE_TTL`, default 10 minutes) and marks
+each response `X-Cache: HIT` or `MISS`. If Redis fails, the reader falls back to MySQL.
+Both answer health checks (`/healthz`, `/readyz`); the reader also serves Prometheus
+metrics on `/metrics`.
+
+After each committed `PUT` or `DELETE`, the writer deletes the item's Redis key, so the
+next read loads the new row. This is a dual write with known gaps: a crash or Redis
+failure between the commit and the delete, and a read-repopulate race, can each leave
+the old value cached until its TTL runs out. Binlog-driven invalidation is not built yet.
 
 ## How to run
 
@@ -92,6 +99,8 @@ Prerequisites: Go 1.27+, Docker with Compose v2, make.
 make up                          # build images, start MySQL, Redis, writer, reader
 curl localhost:8080/readyz       # writer: "ready" once MySQL is reachable
 curl localhost:8081/readyz       # reader
+curl -i localhost:8081/api/v1/items/1   # X-Cache: MISS the first time, HIT after
+curl localhost:8081/metrics      # reader_cache_* counters, MySQL pool stats
 make down                        # stop everything (data is kept in volumes)
 ```
 
@@ -100,7 +109,7 @@ Development:
 ```bash
 make tools                       # once: install the pinned linter and load tester
 make check                       # formatting, vet, lint, tests with the race detector
-make test-integration            # also the API tests against the Compose MySQL (after make up)
+make test-integration            # also the API tests against the Compose MySQL and Redis (after make up)
 make run-writer                  # run the writer on your machine against the Compose MySQL
 ```
 
