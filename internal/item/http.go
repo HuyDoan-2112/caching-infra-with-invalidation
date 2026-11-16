@@ -13,17 +13,17 @@ import (
 // maxBodyBytes caps request bodies; a full item is well under 10 KB.
 const maxBodyBytes = 64 << 10
 
-// WriteHandler serves the item write API (the writer service).
+// WriteHandler serves the item write API (the writer service). It only writes
+// MySQL: the invalidator drops cached copies from the binlog.
 type WriteHandler struct {
 	store *Store
-	inv   Invalidator
 	log   *slog.Logger
 }
 
-// NewWriteHandler returns a WriteHandler that saves items in store, drops
-// their cached copies through inv after each change, and logs failures to log.
-func NewWriteHandler(store *Store, inv Invalidator, log *slog.Logger) *WriteHandler {
-	return &WriteHandler{store: store, inv: inv, log: log}
+// NewWriteHandler returns a WriteHandler that saves items in store and logs
+// failures to log.
+func NewWriteHandler(store *Store, log *slog.Logger) *WriteHandler {
+	return &WriteHandler{store: store, log: log}
 }
 
 // Register adds the write routes to mux.
@@ -159,8 +159,6 @@ func (h *WriteHandler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.inv.Invalidate(r.Context(), id)
-
 	writeJSON(w, http.StatusOK, it)
 }
 
@@ -183,8 +181,6 @@ func (h *WriteHandler) delete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "internal error", nil)
 		return
 	}
-
-	h.inv.Invalidate(r.Context(), id)
 
 	w.WriteHeader(http.StatusNoContent)
 }

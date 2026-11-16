@@ -45,6 +45,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		os.Exit(1)
 	}
+	kafkaCfg = cfg.Kafka
 	// Fail loudly: asking for integration tests means MySQL and Redis must be there.
 	db, err = mysqldb.Open(context.Background(), cfg.MySQL)
 	if err != nil {
@@ -62,16 +63,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// newMux returns the writer's routes as in production: the real database,
-// invalidating the reader's cache in the real Redis.
+// newMux returns the writer's routes as in production: the real database
+// only. The invalidator (running in Compose) drops cached copies from the binlog.
 func newMux() http.Handler {
-	return newMuxWith(rdb)
-}
-
-// newMuxWith is newMux with the invalidator using client c.
-func newMuxWith(c *redis.Client) http.Handler {
 	mux := http.NewServeMux()
-	item.NewWriteHandler(item.NewStore(db), item.NewRedisInvalidator(c, discardLog()), discardLog()).Register(mux)
+	item.NewWriteHandler(item.NewStore(db), discardLog()).Register(mux)
 	return mux
 }
 
@@ -428,7 +424,7 @@ func TestGetCache(t *testing.T) {
 
 	t.Run("miss stores the item, then hits", func(t *testing.T) {
 		reader, reg := newReader(rdb)
-		created := create(t, writer, `{"name":"cached","price_cents":5,"currency":"USD"}`)
+		created := createSettled(t, writer, `{"name":"cached","price_cents":5,"currency":"USD"}`)
 		path := itemPath(created.ID)
 
 		miss := do(t, reader, http.MethodGet, path, "")
@@ -447,18 +443,20 @@ func TestGetCache(t *testing.T) {
 	})
 
 	t.Run("hit does not read MySQL", func(t *testing.T) {
-		// Change the row behind the cache's back: a direct SQL change goes
-		// around the writer's DEL, so a hit must still serve the cached copy.
-		// Proves the hit came from Redis alone.
-		reader, reg := newReader(rdb)
-		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
+		// Count the reader's MySQL reads: the miss makes one, the hit none.
+		// (Changing the row behind the cache no longer works as a probe: the
+		// invalidator sees direct SQL changes too, and drops the copy.)
+		reg := prometheus.NewRegistry()
+		store := &countingGetter{inner: item.NewStore(db)}
+		reader := http.NewServeMux()
+		item.NewReadHandler(item.NewCache(store, rdb, discardLog(), testTTL, item.NewCacheMetrics(reg)), discardLog()).Register(reader)
+
+		created := createSettled(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
 		path := itemPath(created.ID)
 		wantCache(t, do(t, reader, http.MethodGet, path, ""), "MISS")
-		if _, err := db.Exec("UPDATE items SET name = 'after' WHERE id = ?", created.ID); err != nil {
-			t.Fatal(err)
-		}
-		if got := wantCache(t, do(t, reader, http.MethodGet, path, ""), "HIT"); got.Name != "before" {
-			t.Errorf("name = %q, want the cached \"before\"", got.Name)
+		wantCache(t, do(t, reader, http.MethodGet, path, ""), "HIT")
+		if store.calls != 1 {
+			t.Errorf("MySQL reads = %d, want 1 (the miss only)", store.calls)
 		}
 		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 1, "miss": 1})
 	})
@@ -479,7 +477,7 @@ func TestGetCache(t *testing.T) {
 
 	t.Run("corrupt entry is replaced from MySQL", func(t *testing.T) {
 		reader, reg := newReader(rdb)
-		created := create(t, writer, `{"name":"fresh","price_cents":1,"currency":"USD"}`)
+		created := createSettled(t, writer, `{"name":"fresh","price_cents":1,"currency":"USD"}`)
 		if err := rdb.Set(ctx, cacheKey(created.ID), "not json", testTTL).Err(); err != nil {
 			t.Fatal(err)
 		}
@@ -573,17 +571,22 @@ func TestServicesOnlyServeTheirOwnRoutes(t *testing.T) {
 	}
 }
 
-func TestWriteInvalidatesCache(t *testing.T) {
+// TestInvalidatorDropsCacheAfterWrite checks the whole pipeline: a write
+// through the writer reaches the binlog, Debezium, Kafka, and the invalidator,
+// which deletes the reader's cached copy. Needs the full stack (`make up`).
+func TestInvalidatorDropsCacheAfterWrite(t *testing.T) {
 	writer := newMux()
 	reader := newReaderMux()
 	ctx := context.Background()
 
-	// warm caches item id through the reader and proves it is really cached,
-	// so the test below starts from "Redis holds a copy".
-	warm := func(t *testing.T, id int64) {
+	// cached creates an item, waits out the INSERT's own DEL, and caches it
+	// through the reader, so each case starts from "Redis holds a copy".
+	cached := func(t *testing.T, body string) item.Item {
 		t.Helper()
-		wantCache(t, do(t, reader, http.MethodGet, itemPath(id), ""), "MISS")
-		wantCache(t, do(t, reader, http.MethodGet, itemPath(id), ""), "HIT")
+		created := createSettled(t, writer, body)
+		wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS")
+		wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "HIT")
+		return created
 	}
 
 	// wantNoKey requires that Redis holds no copy of item id.
@@ -594,42 +597,65 @@ func TestWriteInvalidatesCache(t *testing.T) {
 			t.Fatal(err)
 		}
 		if n != 0 {
-			t.Fatalf("cache key %s still exists after the write", cacheKey(id))
+			t.Fatalf("cache key %s still exists after the invalidator handled the write", cacheKey(id))
 		}
 	}
 
 	t.Run("PUT drops the cached copy", func(t *testing.T) {
-		created := create(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
-		warm(t, created.ID)
+		created := cached(t, `{"name":"before","price_cents":1,"currency":"USD"}`)
 
-		rec := do(t, writer, http.MethodPut, itemPath(created.ID),
-			`{"name":"after","price_cents":1,"currency":"USD"}`)
-
+		mark := markChanges(t)
+		rec := do(t, writer, http.MethodPut, itemPath(created.ID), `{"name":"after","price_cents":1,"currency":"USD"}`)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("PUT status = %d, want 200; body: %s", rec.Code, rec.Body)
 		}
+		waitInvalidated(t, created.ID, mark)
 
 		wantNoKey(t, created.ID)
-
-		got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS")
-		if got.Name != "after" {
+		if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "after" {
 			t.Errorf("name = %q, want \"after\"", got.Name)
 		}
 	})
 
 	t.Run("DELETE drops the cached copy", func(t *testing.T) {
-		created := create(t, writer, `{"name":"doomed","price_cents":1,"currency":"USD"}`)
-		warm(t, created.ID)
+		created := cached(t, `{"name":"doomed","price_cents":1,"currency":"USD"}`)
 
-		rec := do(t, writer, http.MethodDelete, itemPath(created.ID), "")
-		if rec.Code != http.StatusNoContent {
+		mark := markChanges(t)
+		if rec := do(t, writer, http.MethodDelete, itemPath(created.ID), ""); rec.Code != http.StatusNoContent {
 			t.Fatalf("DELETE status = %d, want 204; body: %s", rec.Code, rec.Body)
 		}
+		waitInvalidated(t, created.ID, mark)
 
 		wantNoKey(t, created.ID)
-
 		wantError(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), http.StatusNotFound, "not_found")
 	})
+
+	t.Run("a change that bypasses the writer is caught too", func(t *testing.T) {
+		created := cached(t, `{"name":"before","price_cents":1,"currency":"USD"}`)
+
+		mark := markChanges(t)
+		if _, err := db.Exec("UPDATE items SET name = 'by-sql' WHERE id = ?", created.ID); err != nil {
+			t.Fatal(err)
+		}
+		waitInvalidated(t, created.ID, mark)
+
+		wantNoKey(t, created.ID)
+		if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "by-sql" {
+			t.Errorf("name = %q, want \"by-sql\"", got.Name)
+		}
+	})
+}
+
+// countingGetter wraps a Getter and counts lookups, to tell a cache hit (no
+// MySQL read) from a miss. Single goroutine only.
+type countingGetter struct {
+	inner item.Getter
+	calls int
+}
+
+func (c *countingGetter) Get(ctx context.Context, id int64) (*item.Item, error) {
+	c.calls++
+	return c.inner.Get(ctx, id)
 }
 
 // pausingGetter wraps a Getter and, after its one lookup, waits until the test
@@ -648,14 +674,15 @@ func (p *pausingGetter) Get(ctx context.Context, id int64) (*item.Item, error) {
 	return it, err
 }
 
-// TestReadRepopulateRaceCachesStaleRow forces the read-repopulate race: the
-// reader reads the old row, the writer commits a new one and DELs the key, then
-// the reader SETs the old row. The test passes while that bug exists; closing
-// the race (Stage 4) should make it fail.
+// TestReadRepopulateRaceCachesStaleRow forces the read-repopulate race, which
+// moving the DEL to the invalidator does not close: the reader reads the old
+// row, the writer commits a new one, the invalidator DELs the key (nothing is
+// cached yet), then the reader SETs the old row. The test passes while that bug
+// exists; closing the race (Stage 4) should make it fail.
 func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	writer := newMux()
 	ctx := context.Background()
-	created := create(t, writer, `{"name":"old","price_cents":1,"currency":"USD"}`)
+	created := createSettled(t, writer, `{"name":"old","price_cents":1,"currency":"USD"}`)
 	path := itemPath(created.ID)
 
 	paused := &pausingGetter{
@@ -679,12 +706,14 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 		t.Fatal("reader never read MySQL: was the key already cached?")
 	}
 
-	// 2. The writer commits the new row and DELs the key. Nothing is cached
-	// yet, so the DEL removes nothing.
+	// 2. The writer commits the new row, and the invalidator DELs the key.
+	// Nothing is cached yet, so the DEL removes nothing.
+	mark := markChanges(t)
 	rec := do(t, writer, http.MethodPut, path, `{"name":"new","price_cents":1,"currency":"USD"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT status = %d, want 200; body: %s", rec.Code, rec.Body)
 	}
+	waitInvalidated(t, created.ID, mark)
 
 	// 3. The reader goes on and caches the old row it read in step 1.
 	release()
@@ -693,7 +722,8 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	}
 
 	// The bug: MySQL has the new row, Redis has the old one with a fresh TTL,
-	// and every reader is served the old one until it expires.
+	// and every reader is served the old one until it expires. No later event
+	// will DEL it: the invalidator already handled this write.
 	var name string
 	if err := db.QueryRow("SELECT name FROM items WHERE id = ?", created.ID).Scan(&name); err != nil {
 		t.Fatal(err)
@@ -711,61 +741,4 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	if got := wantCache(t, do(t, newReaderMux(), http.MethodGet, path, ""), "HIT"); got.Name != "old" {
 		t.Errorf("reader name = %q, want the stale \"old\" from Redis", got.Name)
 	}
-}
-
-// TestWriteWithRedisDown pins the policy for a failed DEL: the write already
-// committed, so the client still gets success and MySQL has the change. The
-// cost is the stale copy the DEL could not remove, served until its TTL.
-func TestWriteWithRedisDown(t *testing.T) {
-	writer := newMux()
-	deadWriter := newMuxWith(deadRedis(t))
-	reader := newReaderMux()
-
-	// cached creates an item and caches it through the reader.
-	cached := func(t *testing.T) item.Item {
-		t.Helper()
-		created := create(t, writer, `{"name":"old","price_cents":1,"currency":"USD"}`)
-		wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS")
-		return created
-	}
-
-	t.Run("PUT succeeds and leaves the old copy cached", func(t *testing.T) {
-		created := cached(t)
-
-		rec := do(t, deadWriter, http.MethodPut, itemPath(created.ID), `{"name":"new","price_cents":1,"currency":"USD"}`)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("PUT status = %d, want 200; body: %s", rec.Code, rec.Body)
-		}
-		if got := decodeItem(t, rec); got.Name != "new" {
-			t.Errorf("PUT body name = %q, want \"new\"", got.Name)
-		}
-		var name string
-		if err := db.QueryRow("SELECT name FROM items WHERE id = ?", created.ID).Scan(&name); err != nil {
-			t.Fatal(err)
-		}
-		if name != "new" {
-			t.Errorf("MySQL name = %q, want \"new\"", name)
-		}
-		if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "HIT"); got.Name != "old" {
-			t.Errorf("reader name = %q, want the stale \"old\" the DEL could not remove", got.Name)
-		}
-	})
-
-	t.Run("DELETE succeeds and leaves the deleted item cached", func(t *testing.T) {
-		created := cached(t)
-
-		if rec := do(t, deadWriter, http.MethodDelete, itemPath(created.ID), ""); rec.Code != http.StatusNoContent {
-			t.Fatalf("DELETE status = %d, want 204; body: %s", rec.Code, rec.Body)
-		}
-		var n int
-		if err := db.QueryRow("SELECT COUNT(*) FROM items WHERE id = ?", created.ID).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if n != 0 {
-			t.Errorf("rows with id %d = %d, want 0", created.ID, n)
-		}
-		if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "HIT"); got.Name != "old" {
-			t.Errorf("reader name = %q, want the deleted item still served from Redis", got.Name)
-		}
-	})
 }

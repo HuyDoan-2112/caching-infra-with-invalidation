@@ -86,10 +86,14 @@ each response `X-Cache: HIT` or `MISS`. If Redis fails, the reader falls back to
 Both answer health checks (`/healthz`, `/readyz`); the reader also serves Prometheus
 metrics on `/metrics`.
 
-After each committed `PUT` or `DELETE`, the writer deletes the item's Redis key, so the
-next read loads the new row. This is a dual write with known gaps: a crash or Redis
-failure between the commit and the delete, and a read-repopulate race, can each leave
-the old value cached until its TTL runs out. Binlog-driven invalidation is not built yet.
+The writer only writes MySQL. Debezium reads the MySQL binlog and publishes each row change
+to Kafka (`cdc.catalog.items`), and the invalidator (`:8082`) deletes the item's Redis key
+for every change, including changes made outside the writer. It commits its Kafka offset only
+after the delete, and it retries while Redis is down. A read right after a write can still
+return the old value for about 0.3s at p50 and 0.9s at p99. The read-repopulate race also
+remains: a reader that caches the old row after the invalidator's delete keeps it until the
+TTL runs out. The invalidator also serves `/healthz`, `/readyz` and `/metrics`. `make up`
+starts the whole stack and registers the Debezium connector.
 
 ## How to run
 

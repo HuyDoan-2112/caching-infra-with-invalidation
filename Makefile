@@ -5,7 +5,7 @@ HEY_VERSION           := v0.1.4
 COMPOSE               := docker compose --env-file .env -f deploy/docker-compose.yml
 
 .DEFAULT_GOAL := check
-.PHONY: check fmt fmt-check vet lint test test-integration tools up down run-writer
+.PHONY: check fmt fmt-check vet lint test test-integration tools up down run-writer connector
 
 # check runs everything CI runs: formatting, vet, lint, tests with the race detector.
 check: fmt-check vet lint test
@@ -40,9 +40,17 @@ tools:
 
 up: .env
 	$(COMPOSE) up -d --wait --build
+	$(MAKE) connector
 
 down:
 	$(COMPOSE) down
+
+# connector registers (or updates) the Debezium connector. PUT is idempotent: safe to rerun.
+connector:
+	curl -fsS -X PUT -H 'Content-Type: application/json' \
+		--data @deploy/connect/catalog-items.json \
+		http://localhost:$${CONNECT_HOST_PORT:-8083}/connectors/catalog-items/config
+	@echo
 
 run-writer: .env
 	set -a && . ./.env && set +a && go run ./cmd/writer
