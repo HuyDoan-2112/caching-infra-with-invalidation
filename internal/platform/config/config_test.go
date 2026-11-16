@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,6 +40,40 @@ func TestLoadCacheTTL(t *testing.T) {
 			}
 			if cfg.CacheTTL != tt.want {
 				t.Errorf("CacheTTL = %v, want %v", cfg.CacheTTL, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadKafkaBrokers(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string // "" means unset: getenv treats empty as unset
+		want    []string
+		wantErr bool
+	}{
+		{name: "unset uses the default", env: "", want: []string{"localhost:9092"}},
+		{name: "one broker", env: "kafka:29092", want: []string{"kafka:29092"}},
+		{name: "several, with spaces", env: "a:9092, b:9092", want: []string{"a:9092", "b:9092"}},
+		{name: "trailing comma", env: "a:9092,", want: []string{"a:9092"}},
+		{name: "only commas", env: ",", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("KAFKA_BOOTSTRAP_SERVERS", tt.env)
+
+			cfg, err := config.Load("INVALIDATOR_PORT", "8082")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "KAFKA_BOOTSTRAP_SERVERS=") {
+					t.Fatalf("err = %v, want an error naming KAFKA_BOOTSTRAP_SERVERS", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if !slices.Equal(cfg.Kafka.Brokers, tt.want) {
+				t.Errorf("Kafka.Brokers = %q, want %q", cfg.Kafka.Brokers, tt.want)
 			}
 		})
 	}

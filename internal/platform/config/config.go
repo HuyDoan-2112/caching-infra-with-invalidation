@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/kafka"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/mysqldb"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/redisdb"
 )
@@ -18,6 +20,7 @@ type Config struct {
 	MySQL    mysqldb.Config
 	Redis    redisdb.Config
 	CacheTTL time.Duration
+	Kafka    kafka.Config
 }
 
 // Load reads the environment, applies defaults, and reports every invalid
@@ -37,6 +40,11 @@ func Load(portVar, defaultPort string) (Config, error) {
 			Host:     getenv("REDIS_HOST", "localhost"),
 			Port:     getenv("REDIS_PORT", "6379"),
 			Password: os.Getenv("REDIS_PASSWORD"), // empty means no auth
+		},
+		Kafka: kafka.Config{
+			Brokers: splitList(getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")),
+			Topic:   getenv("KAFKA_TOPIC", "cdc.catalog.items"),
+			Group:   getenv("KAFKA_GROUP", "cache-invalidator"),
 		},
 	}
 
@@ -65,6 +73,11 @@ func Load(portVar, defaultPort string) (Config, error) {
 	}
 	cfg.CacheTTL = ttl
 
+	if len(cfg.Kafka.Brokers) == 0 {
+		errs = append(errs, fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS=%q must list at least one host:port",
+			os.Getenv("KAFKA_BOOTSTRAP_SERVERS")))
+	}
+
 	return cfg, errors.Join(errs...) // nil when errs is empty
 }
 
@@ -83,4 +96,15 @@ func checkPort(key, v string) error {
 		return fmt.Errorf("%s=%q is not a port (1-65535)", key, v)
 	}
 	return nil
+}
+
+// splitList splits a comma-separated list, trimming spaces and dropping empty entries.
+func splitList(s string) []string {
+	var out []string
+	for part := range strings.SplitSeq(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

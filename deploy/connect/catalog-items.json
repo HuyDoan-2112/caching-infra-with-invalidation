@@ -1,0 +1,18 @@
+{
+  "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+  "tasks.max": "1",
+  "database.hostname": "mysql",
+  "database.port": "3306",
+  "database.user": "debezium",
+  "database.password": "debezium",
+  "database.server.id": "1002",
+  "topic.prefix": "cdc",
+  "database.include.list": "catalog",
+  "table.include.list": "catalog.items",
+  "include.schema.changes": "false",
+  "schema.history.internal.kafka.bootstrap.servers": "kafka:29092",
+  "schema.history.internal.kafka.topic": "cdc.schema-history",
+  "snapshot.mode": "initial",
+  "topic.creation.default.partitions": "6",
+  "topic.creation.default.replication.factor": "1"
+}
