@@ -45,8 +45,12 @@ up: .env
 down:
 	$(COMPOSE) down
 
-# connector registers (or updates) the Debezium connector. PUT is idempotent: safe to rerun.
+# connector creates the change topic, then registers (or updates) the Debezium connector.
+# Both steps are idempotent: safe to rerun. The topic is created here because Debezium
+# creates it only with its first event, which on an empty table is the first write.
 connector:
+	$(COMPOSE) exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 \
+		--create --if-not-exists --topic cdc.catalog.items --partitions 6 --replication-factor 1
 	curl -fsS -X PUT -H 'Content-Type: application/json' \
 		--data @deploy/connect/catalog-items.json \
 		http://localhost:$${CONNECT_HOST_PORT:-8083}/connectors/catalog-items/config
