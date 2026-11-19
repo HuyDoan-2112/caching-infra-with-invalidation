@@ -56,6 +56,7 @@ func wantCounters(t *testing.T, reg prometheus.Gatherer, name string, want map[s
 const (
 	requestsMetric    = "reader_cache_requests_total"
 	redisErrorsMetric = "reader_cache_redis_errors_total"
+	leaseMetric       = "reader_cache_lease_total"
 )
 
 func TestNewCacheMetricsStartsEverySeriesAtZero(t *testing.T) {
@@ -63,7 +64,8 @@ func TestNewCacheMetricsStartsEverySeriesAtZero(t *testing.T) {
 	item.NewCacheMetrics(reg)
 
 	wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 0, "miss": 0, "not_found": 0, "error": 0})
-	wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 0, "decode": 0})
+	wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 0, "decode": 0, "lease": 0})
+	wantCounters(t, reg, leaseMetric, map[string]float64{"acquired": 0, "busy": 0, "fill_rejected": 0})
 }
 
 // fakeStore is the MySQL side of the cache: it returns err if set, otherwise
@@ -129,7 +131,7 @@ func TestCacheWithRedisDown(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			reg := prometheus.NewRegistry()
 			store := &fakeStore{err: tt.storeErr}
-			cache := item.NewCache(store, deadRedis(t), discardLog(), time.Minute, item.NewCacheMetrics(reg))
+			cache := item.NewCache(store, deadRedis(t), discardLog(), time.Minute, 2*time.Second, item.NewCacheMetrics(reg))
 
 			it, hit, err := cache.Get(ctx, 7)
 
@@ -147,7 +149,7 @@ func TestCacheWithRedisDown(t *testing.T) {
 			}
 			wantCounters(t, reg, requestsMetric, tt.wantCount)
 			// The GET failed; the SET is skipped because Redis is known to be down.
-			wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 1, "set": 0, "decode": 0})
+			wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 1, "set": 0, "decode": 0, "lease": 0})
 		})
 	}
 }

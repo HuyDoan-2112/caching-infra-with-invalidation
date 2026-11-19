@@ -20,7 +20,10 @@ type Config struct {
 	MySQL    mysqldb.Config
 	Redis    redisdb.Config
 	CacheTTL time.Duration
-	Kafka    kafka.Config
+	// CacheLeaseTTL bounds how long a reader that took a fill lease and never
+	// came back keeps other readers from filling that item.
+	CacheLeaseTTL time.Duration
+	Kafka         kafka.Config
 }
 
 // Load reads the environment, applies defaults, and reports every invalid
@@ -66,12 +69,14 @@ func Load(portVar, defaultPort string) (Config, error) {
 	}
 	cfg.MySQL.MaxOpenConns = n
 
-	rawTTL := getenv("CACHE_TTL", "10m")
-	ttl, err := time.ParseDuration(rawTTL)
-	if err != nil || ttl <= 0 {
-		errs = append(errs, fmt.Errorf("CACHE_TTL=%q must be a duration > 0, like 10m or 30s", rawTTL))
+	cfg.CacheTTL, err = positiveDuration("CACHE_TTL", "10m")
+	if err != nil {
+		errs = append(errs, err)
 	}
-	cfg.CacheTTL = ttl
+	cfg.CacheLeaseTTL, err = positiveDuration("CACHE_LEASE_TTL", "2s")
+	if err != nil {
+		errs = append(errs, err)
+	}
 
 	if len(cfg.Kafka.Brokers) == 0 {
 		errs = append(errs, fmt.Errorf("KAFKA_BOOTSTRAP_SERVERS=%q must list at least one host:port",
@@ -96,6 +101,17 @@ func checkPort(key, v string) error {
 		return fmt.Errorf("%s=%q is not a port (1-65535)", key, v)
 	}
 	return nil
+}
+
+// positiveDuration reads key as a Go duration (def when unset) and rejects
+// anything that does not parse or is not > 0: Redis would read 0 as "no expiry".
+func positiveDuration(key, def string) (time.Duration, error) {
+	raw := getenv(key, def)
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%s=%q must be a duration > 0, like 10m, 30s or 500ms", key, raw)
+	}
+	return d, nil
 }
 
 // splitList splits a comma-separated list, trimming spaces and dropping empty entries.

@@ -71,7 +71,7 @@ func run(log *slog.Logger) error {
 	}()
 
 	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port),
-		"cache_ttl", cfg.CacheTTL.String())
+		"cache_ttl", cfg.CacheTTL.String(), "cache_lease_ttl", cfg.CacheLeaseTTL.String())
 
 	// Our own registry instead of Prometheus's global one: everything /metrics
 	// shows is registered here, explicitly.
@@ -92,7 +92,7 @@ func run(log *slog.Logger) error {
 	// correct answers from MySQL without it, so it should keep getting traffic.
 	health.Register(mux, log, health.Check{Name: "mysql", Ping: db.PingContext})
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	cache := item.NewCache(item.NewStore(db), rdb, log, cfg.CacheTTL, item.NewCacheMetrics(reg))
+	cache := item.NewCache(item.NewStore(db), rdb, log, cfg.CacheTTL, cfg.CacheLeaseTTL, item.NewCacheMetrics(reg))
 	item.NewReadHandler(cache, log).Register(mux)
 
 	return httpserver.Run(ctx, ln, mux, log)

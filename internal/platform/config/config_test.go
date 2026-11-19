@@ -45,6 +45,39 @@ func TestLoadCacheTTL(t *testing.T) {
 	}
 }
 
+func TestLoadCacheLeaseTTL(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string // "" means unset
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "unset uses the 2s default", env: "", want: 2 * time.Second},
+		{name: "milliseconds", env: "500ms", want: 500 * time.Millisecond},
+		{name: "not a duration", env: "abc", wantErr: true},
+		{name: "zero would mean no expiry in Redis", env: "0s", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CACHE_LEASE_TTL", tt.env)
+
+			cfg, err := config.Load("READER_PORT", "8081")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "CACHE_LEASE_TTL=") {
+					t.Fatalf("err = %v, want an error naming CACHE_LEASE_TTL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if cfg.CacheLeaseTTL != tt.want {
+				t.Errorf("CacheLeaseTTL = %v, want %v", cfg.CacheLeaseTTL, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadKafkaBrokers(t *testing.T) {
 	tests := []struct {
 		name    string

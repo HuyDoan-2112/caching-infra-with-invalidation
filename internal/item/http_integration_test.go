@@ -39,6 +39,9 @@ var (
 // testTTL is the reader cache TTL in tests; tests check the key expires within it.
 const testTTL = time.Minute
 
+// testLeaseTTL is the reader fill lease TTL in tests, the production default.
+const testLeaseTTL = 2 * time.Second
+
 func TestMain(m *testing.M) {
 	cfg, err := config.Load("WRITER_PORT", "8080")
 	if err != nil {
@@ -82,7 +85,7 @@ func newReaderMux() http.Handler {
 // the same metric twice panics.
 func newReaderMuxWith(c *redis.Client, reg prometheus.Registerer) http.Handler {
 	mux := http.NewServeMux()
-	cache := item.NewCache(item.NewStore(db), c, discardLog(), testTTL, item.NewCacheMetrics(reg))
+	cache := item.NewCache(item.NewStore(db), c, discardLog(), testTTL, testLeaseTTL, item.NewCacheMetrics(reg))
 	item.NewReadHandler(cache, discardLog()).Register(mux)
 	return mux
 }
@@ -91,6 +94,10 @@ func newReaderMuxWith(c *redis.Client, reg prometheus.Registerer) http.Handler {
 // not imported, because the invalidator depends on it: changing it should
 // break a test.
 func cacheKey(id int64) string { return "v1:item:" + strconv.FormatInt(id, 10) }
+
+// leaseKey is hardcoded like cacheKey, so a change to item.LeaseKey's format
+// fails the tests instead of passing through them.
+func leaseKey(id int64) string { return "v1:lease:" + strconv.FormatInt(id, 10) }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -449,7 +456,7 @@ func TestGetCache(t *testing.T) {
 		reg := prometheus.NewRegistry()
 		store := &countingGetter{inner: item.NewStore(db)}
 		reader := http.NewServeMux()
-		item.NewReadHandler(item.NewCache(store, rdb, discardLog(), testTTL, item.NewCacheMetrics(reg)), discardLog()).Register(reader)
+		item.NewReadHandler(item.NewCache(store, rdb, discardLog(), testTTL, testLeaseTTL, item.NewCacheMetrics(reg)), discardLog()).Register(reader)
 
 		created := createSettled(t, writer, `{"name":"before","price_cents":1,"currency":"USD"}`)
 		path := itemPath(created.ID)
@@ -502,17 +509,19 @@ func TestGetCache(t *testing.T) {
 		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 2, "set": 0, "decode": 0})
 	})
 
-	t.Run("failed SET still serves the item", func(t *testing.T) {
-		// Redis answers GETs but every SET fails: the reader must still reply
-		// 200 from MySQL, count the failure, and leave nothing in Redis.
-		hook := &failSetHook{}
+	t.Run("failed fill still serves the item", func(t *testing.T) {
+		// Redis answers GETs and grants the lease, but the fill script fails:
+		// the reader must still reply 200 from MySQL, count the failure, and
+		// leave nothing cached.
+		hook := &failFillHook{}
 		failing := redis.NewClient(rdb.Options())
 		failing.AddHook(hook)
 		t.Cleanup(func() { _ = failing.Close() })
 		reader, reg := newReader(failing)
 
 		created := create(t, writer, `{"name":"unsaved","price_cents":1,"currency":"USD"}`)
-		for range 2 { // the SET never lands, so the second read misses too
+		t.Cleanup(func() { rdb.Del(ctx, leaseKey(created.ID)) })
+		for range 2 { // the fill never lands, so the second read misses too
 			if got := wantCache(t, do(t, reader, http.MethodGet, itemPath(created.ID), ""), "MISS"); got.Name != "unsaved" {
 				t.Errorf("name = %q, want \"unsaved\"", got.Name)
 			}
@@ -521,31 +530,36 @@ func TestGetCache(t *testing.T) {
 			t.Errorf("key exists = %d, err = %v; want 0", n, err)
 		}
 		wantCounters(t, reg, requestsMetric, map[string]float64{"hit": 0, "miss": 2})
-		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 2, "decode": 0})
-		// One SET per miss: a second SET would double the Redis writes.
-		if hook.sets != 2 {
-			t.Errorf("SET commands sent = %d, want 2 (one per miss)", hook.sets)
+		wantCounters(t, reg, redisErrorsMetric, map[string]float64{"get": 0, "set": 1, "lease": 0, "decode": 0})
+		// The failed fill never released the lease, so the second miss finds
+		// it held and reads MySQL without trying to fill: one fill in total.
+		wantCounters(t, reg, leaseMetric, map[string]float64{"acquired": 1, "busy": 1, "fill_rejected": 0})
+		if hook.fills != 1 {
+			t.Errorf("fill scripts sent = %d, want 1 (the second miss is busy)", hook.fills)
 		}
 	})
 }
 
-// failSetHook makes every Redis SET fail, leaving other commands untouched,
-// and counts how many SETs the client tried to send.
-type failSetHook struct{ sets int }
+// failFillHook makes the cache's fill script fail (EVALSHA, or EVAL when
+// go-redis falls back to sending the script), leaving other commands
+// untouched, and counts how many fills the client tried to send.
+type failFillHook struct{ fills int }
 
-func (*failSetHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (*failFillHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 
-func (h *failSetHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+func (h *failFillHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "set" {
-			h.sets++
-			return errors.New("injected SET failure")
+		if name := cmd.Name(); name == "evalsha" || name == "eval" {
+			h.fills++
+			err := errors.New("injected fill failure")
+			cmd.SetErr(err)
+			return err
 		}
 		return next(ctx, cmd)
 	}
 }
 
-func (*failSetHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+func (*failFillHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
 }
 
@@ -674,12 +688,12 @@ func (p *pausingGetter) Get(ctx context.Context, id int64) (*item.Item, error) {
 	return it, err
 }
 
-// TestReadRepopulateRaceCachesStaleRow forces the read-repopulate race, which
-// moving the DEL to the invalidator does not close: the reader reads the old
-// row, the writer commits a new one, the invalidator DELs the key (nothing is
-// cached yet), then the reader SETs the old row. The test passes while that bug
-// exists; closing the race (Stage 4) should make it fail.
-func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
+// TestReadRepopulateRaceRefusesStaleFill forces the read-repopulate race: the
+// reader reads the old row, the writer commits a new one, the invalidator DELs
+// the key (nothing is cached yet), then the reader tries to cache the old row.
+// That late fill must be refused, so the next reader gets the new row instead
+// of the old one for a whole TTL.
+func TestReadRepopulateRaceRefusesStaleFill(t *testing.T) {
 	writer := newMux()
 	ctx := context.Background()
 	created := createSettled(t, writer, `{"name":"old","price_cents":1,"currency":"USD"}`)
@@ -694,7 +708,7 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	t.Cleanup(release) // never leave the reader goroutine stuck if the test fails early
 
 	slowReader := http.NewServeMux()
-	cache := item.NewCache(paused, rdb, discardLog(), testTTL, item.NewCacheMetrics(prometheus.NewRegistry()))
+	cache := item.NewCache(paused, rdb, discardLog(), testTTL, testLeaseTTL, item.NewCacheMetrics(prometheus.NewRegistry()))
 	item.NewReadHandler(cache, discardLog()).Register(slowReader)
 
 	// 1. The reader misses, reads the old row from MySQL, and stops before its SET.
@@ -715,15 +729,14 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	}
 	waitInvalidated(t, created.ID, mark)
 
-	// 3. The reader goes on and caches the old row it read in step 1.
+	// 3. The reader goes on and tries to cache the old row it read in step 1.
+	// Its own response is still the old row: its request overlapped the write,
+	// so either answer is legal. Only storing it would be the bug.
 	release()
 	if got := wantCache(t, <-done, "MISS"); got.Name != "old" {
 		t.Fatalf("raced read name = %q, want the old row \"old\"", got.Name)
 	}
 
-	// The bug: MySQL has the new row, Redis has the old one with a fresh TTL,
-	// and every reader is served the old one until it expires. No later event
-	// will DEL it: the invalidator already handled this write.
 	var name string
 	if err := db.QueryRow("SELECT name FROM items WHERE id = ?", created.ID).Scan(&name); err != nil {
 		t.Fatal(err)
@@ -731,14 +744,106 @@ func TestReadRepopulateRaceCachesStaleRow(t *testing.T) {
 	if name != "new" {
 		t.Fatalf("MySQL name = %q, want \"new\"", name)
 	}
-	ttl, err := rdb.TTL(ctx, cacheKey(created.ID)).Result()
+
+	// The late fill was refused: nothing is cached for this item. Checked
+	// before any other read, since a read that misses would fill the key itself.
+	n, err := rdb.Exists(ctx, cacheKey(created.ID)).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ttl < testTTL-5*time.Second || ttl > testTTL {
-		t.Errorf("stale key TTL = %v, want close to the full %v (SET EX starts it over)", ttl, testTTL)
+	if n != 0 {
+		stale, _ := rdb.Get(ctx, cacheKey(created.ID)).Result()
+		t.Fatalf("Redis holds %s, want no key: the stale fill was not refused", stale)
 	}
-	if got := wantCache(t, do(t, newReaderMux(), http.MethodGet, path, ""), "HIT"); got.Name != "old" {
-		t.Errorf("reader name = %q, want the stale \"old\" from Redis", got.Name)
+	// The invalidator's DEL removed the slow reader's lease too, which is what
+	// refused the fill. A lease left behind would also make the next reader busy.
+	if n, err := rdb.Exists(ctx, leaseKey(created.ID)).Result(); err != nil || n != 0 {
+		t.Fatalf("lease key exists = %d, err = %v; want 0: the invalidator must delete it", n, err)
+	}
+
+	// The next reader misses, reads the new row, and caches it.
+	reader := newReaderMux()
+	if got := wantCache(t, do(t, reader, http.MethodGet, path, ""), "MISS"); got.Name != "new" {
+		t.Errorf("next read name = %q, want \"new\"", got.Name)
+	}
+	if got := wantCache(t, do(t, reader, http.MethodGet, path, ""), "HIT"); got.Name != "new" {
+		t.Errorf("read after it name = %q, want \"new\" from Redis", got.Name)
+	}
+}
+
+// TestStalledLeaseHolder covers a reader that took the lease and never comes
+// back in time: other readers are served from MySQL without caching while the
+// lease lives, one of them fills once it expires, and the stalled reader's
+// late fill is refused because the lease no longer holds its token.
+func TestStalledLeaseHolder(t *testing.T) {
+	const leaseTTL = 300 * time.Millisecond
+	ctx := context.Background()
+	created := createSettled(t, newMux(), `{"name":"only","price_cents":1,"currency":"USD"}`)
+	path := itemPath(created.ID)
+
+	paused := &pausingGetter{
+		inner:   item.NewStore(db),
+		loaded:  make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	release := sync.OnceFunc(func() { close(paused.release) })
+	t.Cleanup(release)
+
+	stalledReg := prometheus.NewRegistry()
+	stalled := http.NewServeMux()
+	item.NewReadHandler(item.NewCache(paused, rdb, discardLog(), testTTL, leaseTTL, item.NewCacheMetrics(stalledReg)), discardLog()).Register(stalled)
+
+	otherReg := prometheus.NewRegistry()
+	other := http.NewServeMux()
+	// A shorter TTL than the stalled reader's, so a stalled fill that got
+	// stored would show up as a longer TTL on the key.
+	item.NewReadHandler(item.NewCache(item.NewStore(db), rdb, discardLog(), testTTL/2, leaseTTL, item.NewCacheMetrics(otherReg)), discardLog()).Register(other)
+
+	// 1. The stalled reader misses, takes the lease, reads MySQL, and stops.
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- do(t, stalled, http.MethodGet, path, "") }()
+	select {
+	case <-paused.loaded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stalled reader never read MySQL: was the key already cached?")
+	}
+
+	// 2. While the lease lives, another reader gets the row but must not cache it.
+	wantCache(t, do(t, other, http.MethodGet, path, ""), "MISS")
+	if n, err := rdb.Exists(ctx, cacheKey(created.ID)).Result(); err != nil || n != 0 {
+		t.Fatalf("key exists = %d, err = %v; want 0: a busy reader must not fill", n, err)
+	}
+	wantCounters(t, otherReg, leaseMetric, map[string]float64{"acquired": 0, "busy": 1, "fill_rejected": 0})
+
+	// 3. The lease expires on its own. Then the other reader takes a new one and fills.
+	deadline := time.Now().Add(5 * leaseTTL)
+	for {
+		n, err := rdb.Exists(ctx, leaseKey(created.ID)).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("lease still exists %v after it was taken, want it gone after %v", 5*leaseTTL, leaseTTL)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	wantCache(t, do(t, other, http.MethodGet, path, ""), "MISS")
+	wantCache(t, do(t, other, http.MethodGet, path, ""), "HIT")
+	wantCounters(t, otherReg, leaseMetric, map[string]float64{"acquired": 1, "busy": 1, "fill_rejected": 0})
+
+	// 4. The stalled reader wakes up. Its fill is refused, so the other
+	// reader's copy stays, with the other reader's shorter TTL.
+	release()
+	wantCache(t, <-done, "MISS")
+	wantCounters(t, stalledReg, leaseMetric, map[string]float64{"acquired": 1, "busy": 0, "fill_rejected": 1})
+	ttl, err := rdb.PTTL(ctx, cacheKey(created.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl <= 0 || ttl > testTTL/2 {
+		t.Errorf("item TTL = %v, want at most %v: the stalled reader's fill (TTL %v) was stored", ttl, testTTL/2, testTTL)
 	}
 }
