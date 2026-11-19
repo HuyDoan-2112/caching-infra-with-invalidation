@@ -90,10 +90,15 @@ The writer only writes MySQL. Debezium reads the MySQL binlog and publishes each
 to Kafka (`cdc.catalog.items`), and the invalidator (`:8082`) deletes the item's Redis key
 for every change, including changes made outside the writer. It commits its Kafka offset only
 after the delete, and it retries while Redis is down. A read right after a write can still
-return the old value for about 0.3s at p50 and 0.9s at p99. The read-repopulate race also
-remains: a reader that caches the old row after the invalidator's delete keeps it until the
-TTL runs out. The invalidator also serves `/healthz`, `/readyz` and `/metrics`. `make up`
-starts the whole stack and registers the Debezium connector.
+return the old value for about 0.3s at p50 and 0.9s at p99. The invalidator also serves
+`/healthz`, `/readyz` and `/metrics`. `make up` starts the whole stack and registers the
+Debezium connector.
+
+A reader that misses takes a short **fill lease** first (`v1:lease:{id}`, `CACHE_LEASE_TTL`,
+default 2s), and caches the row only if a Lua script finds its lease still in place. The
+invalidator deletes the lease together with the item key, so a reader that read the old row
+before a change can no longer cache it after the change's delete (the read-repopulate race).
+Other readers that miss while the lease is held read MySQL without caching.
 
 ## How to run
 
