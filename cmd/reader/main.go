@@ -81,6 +81,7 @@ func run(log *slog.Logger) error {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}), // process_*: CPU, RSS, open fds
 		collectors.NewDBStatsCollector(db, cfg.MySQL.Database),            // go_sql_*: pool in use, waits
 	)
+	reg.MustRegister(redisdb.PoolCollectors(rdb, "reader")...) // reader_redis_pool_*: waits, timeouts
 
 	ln, err := net.Listen("tcp", ":"+cfg.HTTPPort)
 	if err != nil {
