@@ -76,3 +76,14 @@ func SplitWarmup(n int, warm, send func(i int, due time.Time)) func(i int, due t
 		send(i, due)
 	}
 }
+
+// ByWindow sends request i to sends[(i-first)/perWindow], so each window of
+// perWindow requests records into its own Recorder. A request outside the
+// windows goes to the nearest one.
+func ByWindow(first, perWindow int, sends []func(i int, due time.Time)) func(i int, due time.Time) {
+	return func(i int, due time.Time) {
+		w := (i - first) / perWindow
+		w = max(0, min(w, len(sends)-1))
+		sends[w](i, due)
+	}
+}

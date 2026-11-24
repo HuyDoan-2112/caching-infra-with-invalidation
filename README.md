@@ -62,7 +62,8 @@ cdc-cache-invalidation/
 ├── cmd/                  One folder per runnable program (the folder name is the binary name)
 │   ├── writer/           HTTP API for create / update / delete, MySQL only
 │   ├── reader/           HTTP API for reads, cache-aside through Redis
-│   └── invalidator/      Kafka consumer that deletes stale cache keys
+│   ├── invalidator/      Kafka consumer that deletes stale cache keys
+│   └── loadgen/          Open-loop load generator for the writer and reader
 ├── internal/             Shared Go packages used by the programs above
 │                         (Go forbids importing these from outside this module)
 ├── deploy/               Docker Compose and infrastructure config
@@ -100,6 +101,17 @@ invalidator deletes the lease together with the item key, so a reader that read 
 before a change can no longer cache it after the change's delete (the read-repopulate race).
 Other readers that miss while the lease is held read MySQL without caching.
 
+`cmd/loadgen` sends load on a fixed timetable (open loop): request `i` goes out at
+`start + i × interval` whether or not earlier ones were answered, and its latency counts
+from when it was due, so a stall shows up in every request it delayed instead of in one.
+It seeds items through the writer, mixes reads, updates and creates, and reports p50 to
+max per kind (read HIT, read MISS, update, create), drops, errors and the hit ratio, with
+the warmup reported on its own. On one 16-CPU machine running the whole stack, with the
+default 80/10/10 mix, writes are the first limit, at about 1,000 commits a second
+(6,000 req/s), because every commit waits for a disk flush; reads hold until somewhere
+between 6,000 and 8,000 req/s, when every CPU is busy. The reader also exports its Redis
+pool's waits and timeouts on `/metrics`.
+
 ## How to run
 
 Prerequisites: Go 1.27+, Docker with Compose v2, make.
@@ -120,6 +132,14 @@ make tools                       # once: install the pinned linter and load test
 make check                       # formatting, vet, lint, tests with the race detector
 make test-integration            # also the API tests against the Compose MySQL and Redis (after make up)
 make run-writer                  # run the writer on your machine against the Compose MySQL
+```
+
+Load (after `make up`):
+
+```bash
+go run ./cmd/loadgen -h                                  # every flag and its default
+go run ./cmd/loadgen -rate=2000 -duration=30s            # 10s warmup, then 30s measured
+go run ./cmd/loadgen -rate=2000 -dist=zipf -window=10s   # hot items; p99 per 10s window
 ```
 
 ## Acknowledgements

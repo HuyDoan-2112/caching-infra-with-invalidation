@@ -72,3 +72,30 @@ func (r *Recorder) Count(k Kind) int64 {
 func (r *Recorder) Errors(op Op) int64 {
 	return r.errors[op].Load()
 }
+
+// Percentile is the latency at percentile q (0-100) for kind k, or 0 if
+// nothing was recorded.
+func (r *Recorder) Percentile(k Kind, q float64) time.Duration {
+	p := &r.pages[k]
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return micros(p.hist.ValueAtQuantile(q))
+}
+
+// Merge adds everything from has recorded into r: every latency on every page
+// and every error count. A percentile of the merged Recorder is exact for all
+// the requests together, unlike an average of percentiles.
+func (r *Recorder) Merge(from *Recorder) {
+	for k := range r.pages {
+		dst, src := &r.pages[k], &from.pages[k]
+		dst.mu.Lock()
+		src.mu.Lock()
+		dst.hist.Merge(src.hist)
+		src.mu.Unlock()
+		dst.mu.Unlock()
+	}
+	for op := range r.errors {
+		r.errors[op].Add(from.errors[op].Load())
+	}
+
+}

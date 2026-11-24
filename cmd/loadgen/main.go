@@ -39,6 +39,7 @@ func run() error {
 	timeout := flag.Duration("timeout", 5*time.Second, "per-request timeout; a request past it counts as an error")
 	readURL := flag.String("read-url", "http://localhost:8081", "reader base URL")
 	writeURL := flag.String("write-url", "http://localhost:8080", "writer base URL")
+	window := flag.Duration("window", 0, "if set, also print the p99 of every window this long, their average, and the p99 of all requests")
 	flag.Parse()
 
 	// Check every flag before seeding: seeding a million items takes minutes.
@@ -51,6 +52,10 @@ func run() error {
 	}
 	if *rate < 1 || *items < 1 || *maxInFlight < 1 {
 		return fmt.Errorf("-rate, -items and -max-inflight must be at least 1")
+	}
+	perWindow := int(*window * time.Duration(*rate) / time.Second) // multiply first
+	if *window < 0 || (*window > 0 && perWindow < 1) {
+		return fmt.Errorf("-window=%v: must hold at least one request at -rate=%d", *window, *rate)
 	}
 
 	// Ctrl+C stops seeding and stops the schedule. Requests already sent are
@@ -82,20 +87,45 @@ func run() error {
 	warmRec, rec := loadgen.NewRecorder(), loadgen.NewRecorder()
 	inFlight := context.Background()
 	warmupN := int(*warmup * time.Duration(*rate) / time.Second) // multiply first
+	measured := loadgen.NewSend(inFlight, client, *readURL, *writeURL, pick, mix, rec)
+
+	// With -window, every window records into its own Recorder, and rec gets
+	// them all merged after the run.
+	var windows []*loadgen.Recorder
+	if *window > 0 {
+		n := int((*duration + *window - 1) / *window) // round up: a shorter last window still counts
+		sends := make([]func(int, time.Time), n)
+		windows = make([]*loadgen.Recorder, n)
+		for w := range n {
+			windows[w] = loadgen.NewRecorder()
+			sends[w] = loadgen.NewSend(inFlight, client, *readURL, *writeURL, pick, mix, windows[w])
+		}
+		measured = loadgen.ByWindow(warmupN, perWindow, sends)
+	}
 	send := loadgen.SplitWarmup(warmupN,
-		loadgen.NewSend(inFlight, client, *readURL, *writeURL, pick, mix, warmRec),
-		loadgen.NewSend(inFlight, client, *readURL, *writeURL, pick, mix, rec))
+		loadgen.NewSend(inFlight, client, *readURL, *writeURL, pick, mix, warmRec), measured)
 
 	fmt.Printf("running %d req/s: %v warmup + %v measured, mix %s, dist %s\n",
 		*rate, *warmup, *duration, *mixFlag, *dist)
 	sent, dropped := loadgen.Schedule(ctx, *rate, *warmup+*duration, *maxInFlight, send)
+	for _, w := range windows {
+		rec.Merge(w)
+	}
+
 	fmt.Printf("\nwhole run: %d scheduled, %d sent, %d dropped\n\n", sent+dropped, sent, dropped)
 
 	if err := warmRec.Report(os.Stdout, fmt.Sprintf("warmup (%v)", *warmup)); err != nil {
 		return err
 	}
 	fmt.Println()
-	return rec.Report(os.Stdout, fmt.Sprintf("measured (%v)", *duration))
+
+	if err := rec.Report(os.Stdout, fmt.Sprintf("measured (%v)", *duration)); err != nil {
+		return err
+	}
+	if len(windows) > 0 {
+		printWindows(*window, *duration, windows, rec)
+	}
+	return nil
 }
 
 // parseMix reads "80/10/10" as read/update/create percentages that add up to
@@ -109,4 +139,50 @@ func parseMix(s string) (loadgen.Mix, error) {
 		return loadgen.Mix{}, fmt.Errorf("-mix=%q: percentages must be 0 or more and add up to 100", s)
 	}
 	return loadgen.Mix{Read: read, Update: update}, nil
+}
+
+// printWindows prints each window's p99 per kind, the plain average of those
+// p99s, and the p99 of all the requests together (merged): the average is not
+// a percentile of anything, the merged one is.
+func printWindows(size, duration time.Duration, windows []*loadgen.Recorder, merged *loadgen.Recorder) {
+	kinds := []loadgen.Kind{loadgen.ReadHit, loadgen.ReadMiss, loadgen.Update, loadgen.Create}
+	row := func(label string, cells []string) {
+		fmt.Printf("%-22s", label)
+		for _, c := range cells {
+			fmt.Printf(" %11s", c)
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("\np99 per %v window\n", size)
+	row("window", []string{"read HIT", "read MISS", "update", "create"})
+	sums := make([]time.Duration, len(kinds))
+	counts := make([]int, len(kinds))
+	for i, rec := range windows {
+		cells := make([]string, len(kinds))
+		for j, k := range kinds {
+			if rec.Count(k) == 0 {
+				cells[j] = "-"
+				continue
+			}
+			p := rec.Percentile(k, 99)
+			sums[j] += p
+			counts[j]++
+			cells[j] = p.Round(time.Microsecond).String()
+		}
+		from, to := time.Duration(i)*size, min(time.Duration(i+1)*size, duration)
+		row(fmt.Sprintf("%v-%v", from, to), cells)
+	}
+
+	avg := make([]string, len(kinds))
+	all := make([]string, len(kinds))
+	for j, k := range kinds {
+		avg[j], all[j] = "-", "-"
+		if counts[j] > 0 {
+			avg[j] = (sums[j] / time.Duration(counts[j])).Round(time.Microsecond).String()
+			all[j] = merged.Percentile(k, 99).Round(time.Microsecond).String()
+		}
+	}
+	row("average of the p99s", avg)
+	row("p99 of all (merged)", all)
 }

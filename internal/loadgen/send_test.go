@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -92,5 +93,23 @@ func TestSendCountsFailuresAsErrors(t *testing.T) {
 		if got := rec.Count(k); got != 0 {
 			t.Errorf("kind %d: %d recorded, want 0: a failure has no latency", k, got)
 		}
+	}
+}
+
+func TestByWindowSendsEachRequestToItsWindow(t *testing.T) {
+	got := make([][]int, 3)
+	var sends []func(int, time.Time)
+	for w := range 3 {
+		sends = append(sends, func(i int, _ time.Time) { got[w] = append(got[w], i) })
+	}
+
+	send := loadgen.ByWindow(10, 2, sends) // windows start at request 10, 2 requests each
+	for i := 10; i < 17; i++ {
+		send(i, time.Now())
+	}
+
+	want := [][]int{{10, 11}, {12, 13}, {14, 15, 16}} // 16 is past the last window: goes to the last
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("windows got %v, want %v", got, want)
 	}
 }
