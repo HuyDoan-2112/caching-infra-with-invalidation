@@ -1,6 +1,7 @@
 {
   "connector.class": "io.debezium.connector.mysql.MySqlConnector",
   "tasks.max": "1",
+  "poll.interval.ms": "50",
   "database.hostname": "mysql",
   "database.port": "3306",
   "database.user": "debezium",
