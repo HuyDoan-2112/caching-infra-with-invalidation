@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/$SERVICE
 
 # --- runtime: only the binary ---
-# debug-nonroot adds busybox (/busybox/wget) for the Compose healthcheck, like the reference.
+# debug-nonroot adds busybox (/busybox/wget) for the Compose healthcheck.
 FROM gcr.io/distroless/static-debian13:debug-nonroot
 COPY --from=build /out/app /app
 USER nonroot:nonroot
