@@ -84,7 +84,7 @@ func Load(portVar, defaultPort string) (Config, error) {
 	}
 
 	// More members than partitions is allowed: the extra ones join the group and
-	// wait idle, as in the reference.
+	// wait idle until a busy member leaves.
 	raw = getenv("KAFKA_CONCURRENCY", "3")
 	cfg.Kafka.Concurrency, err = strconv.Atoi(raw)
 	if err != nil || cfg.Kafka.Concurrency < 1 {

@@ -102,10 +102,10 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	// No readiness checks, like the reference (Spring Boot's readiness group only
-	// says the app has started). Startup already failed if Redis or Kafka was
-	// unreachable, no Service sends the invalidator traffic, and a Redis outage
-	// is handled by retrying each DEL, not by taking pods out.
+	// No readiness checks: /readyz only says the process has started. Startup
+	// already failed if Redis or Kafka was unreachable, no Service sends the
+	// invalidator traffic, and a Redis outage is handled by retrying each DEL,
+	// not by taking pods out.
 	health.Register(mux, log)
 	// The members and the HTTP server stop together: when the server returns, or
 	// the last member does, cancel ends the rest.
@@ -125,8 +125,7 @@ func run(log *slog.Logger) error {
 			mlog := log.With("member", i+1)
 			runErrs[i] = invalidator.Run(ctx, cl, h, mlog)
 			cl.Close() // leaves the group, so its partitions move at once
-			// Like Spring Kafka's containers, a member that stops on its own
-			// doesn't stop the others.
+			// A member that stops on its own doesn't stop the others.
 			if ctx.Err() == nil {
 				mlog.Warn("member stopped, the others keep running", "err", runErrs[i])
 			}

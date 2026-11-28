@@ -13,7 +13,7 @@ metadata:
     app.kubernetes.io/name: invalidator
 spec:
   replicas: 3
-  # Up to one extra and one missing pod during a restart, like the reference.
+  # Up to one extra and one missing pod during a restart.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -51,7 +51,7 @@ spec:
           resources:
             requests: { cpu: "150m", memory: "320Mi" }
             limits: { cpu: "1", memory: "768Mi" }
-          # /readyz checks nothing, like the reference: Ready only means the process
+          # /readyz checks nothing: Ready only means the process
           # started, which it can't without reaching Kafka and Redis. It says nothing
           # about partitions: a member beyond the partition count is Ready and idle.
           readinessProbe:

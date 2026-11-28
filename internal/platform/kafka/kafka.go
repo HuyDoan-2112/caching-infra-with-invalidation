@@ -15,14 +15,13 @@ const (
 	// the others keep being consumed during a rebalance (KIP-429).
 	BalancerCooperativeSticky = "cooperative-sticky"
 	// BalancerRange is eager: on every rebalance, every member gives up all its
-	// partitions until the new assignment arrives. It is what the reference's
-	// Java consumers end up using by default.
+	// partitions until the new assignment arrives.
 	BalancerRange = "range"
 )
 
 // sessionTimeout is how long the group waits for a member that stopped sending
-// heartbeats (a crashed pod) before giving its partitions to the others. 30s like
-// the reference; franz-go's default is 45s.
+// heartbeats (a crashed pod) before giving its partitions to the others.
+// franz-go's default is 45s.
 const sessionTimeout = 30 * time.Second
 
 // Config says where to consume change events from, and how many group members
@@ -32,7 +31,7 @@ type Config struct {
 	Topic   string
 	Group   string
 	// Concurrency is the number of clients, each its own group member, that one
-	// process runs (KAFKA_CONCURRENCY). Like Spring Kafka's setConcurrency.
+	// process runs (KAFKA_CONCURRENCY).
 	Concurrency int
 	// Balancer is BalancerCooperativeSticky or BalancerRange (KAFKA_BALANCER).
 	// The broker refuses a member whose balancer the group doesn't use
