@@ -64,3 +64,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 20
             failureThreshold: 4
+          # Nothing routes traffic here, so the sleep doesn't stop any requests: the pod
+          # keeps consuming for 5s, then SIGTERM ends Run, which commits and leaves the
+          # group. It delays the rebalance by 5s rather than speeding it up.
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }

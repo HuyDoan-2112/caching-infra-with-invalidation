@@ -77,3 +77,7 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 4
+          # Delay SIGTERM until ingress-nginx has dropped this pod (see 30-writer.yaml).
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }

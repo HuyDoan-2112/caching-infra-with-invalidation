@@ -85,3 +85,11 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 15
             failureThreshold: 4
+          # When a pod is deleted, Kubernetes sends SIGTERM and removes the pod from
+          # ingress-nginx's list at the same time, with no order between the two. The
+          # sleep delays SIGTERM by 5s, so nginx has stopped sending new requests here
+          # before the server stops accepting them. The 30s grace period includes
+          # the sleep, leaving 25s for the 10s server shutdown.
+          lifecycle:
+            preStop:
+              sleep: { seconds: 5 }
