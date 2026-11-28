@@ -68,7 +68,7 @@ cdc-cache-invalidation/
 │                         (Go forbids importing these from outside this module)
 ├── deploy/               Docker Compose, Kubernetes and infrastructure config
 │   ├── docker-compose.yml
-│   ├── k8s/              Kustomize manifests for a local kind cluster (make k8s-up)
+│   ├── k8s/              Kustomize manifests for a local kind cluster, with their own README
 │   ├── connect/          Debezium connector config, shared by Compose and kind
 │   └── mysql/            MySQL image with the binlog settings and the schema built in
 ├── docs/
@@ -160,6 +160,9 @@ make k8s-images    # build the four images: MySQL with the schema, writer, reade
 make k8s-load      # copy them into the kind nodes, so no registry is needed
 make k8s-up        # kubectl apply -k deploy/k8s, wait for every rollout and the connector Job
 ```
+
+What each manifest does, the start order and the day-to-day commands are in
+[deploy/k8s/README.md](deploy/k8s/README.md).
 
 From no cluster to a running system takes about 4 minutes on one machine. Point the two
 host names at the ingress, then run the same round trip as with Compose:
