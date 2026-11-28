@@ -111,3 +111,72 @@ func TestLoadKafkaBrokers(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadKafkaConcurrency(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{name: "unset uses the default", env: "", want: 3},
+		{name: "one member", env: "1", want: 1},
+		{name: "more members than partitions is allowed", env: "7", want: 7},
+		{name: "zero", env: "0", wantErr: true},
+		{name: "negative", env: "-2", wantErr: true},
+		{name: "not a number", env: "three", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("KAFKA_CONCURRENCY", tt.env)
+
+			cfg, err := config.Load("INVALIDATOR_PORT", "8082")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "KAFKA_CONCURRENCY=") {
+					t.Fatalf("err = %v, want an error naming KAFKA_CONCURRENCY", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if cfg.Kafka.Concurrency != tt.want {
+				t.Errorf("Kafka.Concurrency = %d, want %d", cfg.Kafka.Concurrency, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadKafkaBalancer(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset uses the default", env: "", want: "cooperative-sticky"},
+		{name: "cooperative-sticky", env: "cooperative-sticky", want: "cooperative-sticky"},
+		{name: "range", env: "range", want: "range"},
+		{name: "unknown", env: "round-robin", wantErr: true},
+		{name: "case matters", env: "Range", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("KAFKA_BALANCER", tt.env)
+
+			cfg, err := config.Load("INVALIDATOR_PORT", "8082")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "KAFKA_BALANCER=") {
+					t.Fatalf("err = %v, want an error naming KAFKA_BALANCER", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+			if cfg.Kafka.Balancer != tt.want {
+				t.Errorf("Kafka.Balancer = %q, want %q", cfg.Kafka.Balancer, tt.want)
+			}
+		})
+	}
+}

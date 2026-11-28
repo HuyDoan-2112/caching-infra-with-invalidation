@@ -83,6 +83,20 @@ func Load(portVar, defaultPort string) (Config, error) {
 			os.Getenv("KAFKA_BOOTSTRAP_SERVERS")))
 	}
 
+	// More members than partitions is allowed: the extra ones join the group and
+	// wait idle until a busy member leaves.
+	raw = getenv("KAFKA_CONCURRENCY", "3")
+	cfg.Kafka.Concurrency, err = strconv.Atoi(raw)
+	if err != nil || cfg.Kafka.Concurrency < 1 {
+		errs = append(errs, fmt.Errorf("KAFKA_CONCURRENCY=%q must be an integer >= 1", raw))
+	}
+
+	cfg.Kafka.Balancer = getenv("KAFKA_BALANCER", kafka.BalancerCooperativeSticky)
+	if b := cfg.Kafka.Balancer; b != kafka.BalancerCooperativeSticky && b != kafka.BalancerRange {
+		errs = append(errs, fmt.Errorf("KAFKA_BALANCER=%q must be %q or %q",
+			b, kafka.BalancerCooperativeSticky, kafka.BalancerRange))
+	}
+
 	return cfg, errors.Join(errs...) // nil when errs is empty
 }
 

@@ -1,6 +1,7 @@
 # The invalidator: reads change events from Kafka and deletes the changed items' cache
-# keys in Redis. 3 pods in one consumer group share the topic's 6 partitions. Kafka keeps
-# the group's position (committed offsets), so the pods hold no state: a Deployment.
+# keys in Redis. 3 pods, each running KAFKA_CONCURRENCY group members (02-configmap.yaml),
+# share the topic's 6 partitions. Kafka keeps the group's position (committed offsets),
+# so the pods hold no state: a Deployment.
 #
 # No Service: nothing sends it requests. Its port only serves the probes and /metrics,
 # which are read pod by pod (a Service would pick a random pod per connection).
@@ -12,7 +13,7 @@ metadata:
     app.kubernetes.io/name: invalidator
 spec:
   replicas: 3
-  # Up to one extra and one missing pod during a restart, like the reference.
+  # Up to one extra and one missing pod during a restart.
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -50,8 +51,9 @@ spec:
           resources:
             requests: { cpu: "150m", memory: "320Mi" }
             limits: { cpu: "1", memory: "768Mi" }
-          # Ready means connected to Kafka and Redis, not "owns partitions": a pod beyond
-          # the partition count is Ready and idle.
+          # /readyz checks nothing: Ready only means the process
+          # started, which it can't without reaching Kafka and Redis. It says nothing
+          # about partitions: a member beyond the partition count is Ready and idle.
           readinessProbe:
             httpGet: { path: /readyz, port: http }
             initialDelaySeconds: 2
