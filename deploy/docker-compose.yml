@@ -13,7 +13,6 @@ services:
       - "${MYSQL_HOST_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./mysql/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
       interval: 5s
@@ -102,8 +101,12 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9092}
+      # Two client listeners, because Kafka must tell each kind of client an address it can
+      # reach: containers get kafka:9092, programs on your machine get localhost:9092.
+      # One port per listener, so the second one is 29092 inside the container, published
+      # on your machine as 9092. Everyone types :9092.
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:${KAFKA_HOST_PORT:-9092}
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
@@ -113,16 +116,16 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_LOG_DIRS: /var/lib/kafka/data
     ports:
-      - "${KAFKA_HOST_PORT:-9092}:9092"
+      - "${KAFKA_HOST_PORT:-9092}:29092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 5s
       timeout: 10s
       retries: 30
 
-  connect:
+  kafka-connect:
     image: quay.io/debezium/connect:3.6.2.Final
     depends_on:
       kafka:
@@ -130,8 +133,8 @@ services:
       mysql:
         condition: service_healthy
     environment:
-      BOOTSTRAP_SERVERS: kafka:29092
-      GROUP_ID: cdc-connect
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: connect-cluster
       CONFIG_STORAGE_TOPIC: connect-configs
       OFFSET_STORAGE_TOPIC: connect-offsets
       STATUS_STORAGE_TOPIC: connect-status
@@ -166,7 +169,7 @@ services:
       INVALIDATOR_PORT: "8082"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: cdc.catalog.items
       KAFKA_GROUP: cache-invalidator
     ports:

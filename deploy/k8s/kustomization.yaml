@@ -1,0 +1,46 @@
+# Entry point for the whole system:  kubectl apply -k deploy/k8s
+# Preview what it sends:              kubectl kustomize deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Every namespaced object below lands here, whatever its own file says.
+namespace: cdc-cache-invalidation
+
+# Added to every object's metadata only. includeSelectors: false keeps them out of
+# selectors: a Deployment's selector can't change after creation, so a label added
+# there later would mean deleting and recreating the Deployment.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: cdc-cache-invalidation
+      app.kubernetes.io/managed-by: kustomize
+
+# The number prefixes are for people. Kustomize sorts its output by kind (Namespace
+# first, then config, then workloads), and nothing here waits for anything to be ready.
+resources:
+  - 00-namespace.yaml
+  - 01-secret.yaml
+  - 02-configmap.yaml
+  - 11-mysql.yaml
+  - 15-kafka.yaml
+  - 16-kafka-connect.yaml
+  - 17-debezium-connector.yaml
+  - 20-redis.yaml
+  - 30-writer.yaml
+  - 31-reader.yaml
+  - 32-invalidator.yaml
+  - 40-hpa.yaml
+  - 99-ingress.yaml
+  # A folder, not a file: its own kustomization turns catalog-items.json into the
+  # debezium-connector ConfigMap, so Compose and kind share one connector config.
+  - ../connect
+
+# Our images exist only inside the kind nodes (kind load docker-image). Change a tag
+# here to roll out a new build of a service.
+images:
+  - name: cdc-writer
+    newTag: dev
+  - name: cdc-reader
+    newTag: dev
+  - name: cdc-invalidator
+    newTag: dev

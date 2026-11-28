@@ -1,0 +1,40 @@
+# The way in from outside: ingress-nginx on the control-plane node answers on the host's
+# port 80 (kind-cluster.yaml) and sends each request to the writer or the reader by its
+# Host header. nginx picks a pod per request, so pods the HPA adds get traffic at once.
+#
+#   echo "127.0.0.1 writer.cache.local reader.cache.local" | sudo tee -a /etc/hosts
+#   curl -X POST http://writer.cache.local/api/v1/items -H 'Content-Type: application/json' -d '...'
+#   curl -i http://reader.cache.local/api/v1/items/1
+#
+# ingress-nginx is retired (no releases after March 2026); make kind-up pins its last
+# release, controller-v1.15.1. Its successor is the Gateway API.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cdc-cache-invalidation
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: writer.cache.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: writer
+                port:
+                  name: http
+    - host: reader.cache.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: reader
+                port:
+                  name: http

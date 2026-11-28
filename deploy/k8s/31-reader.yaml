@@ -1,0 +1,79 @@
+# The reader: 3 identical pods behind one Service, serving reads from Redis and falling
+# back to MySQL on a miss (cache-aside). Same shape as the writer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: reader
+  labels:
+    app.kubernetes.io/name: reader
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: reader
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reader
+  labels:
+    app.kubernetes.io/name: reader
+spec:
+  # No replicas: here. The HPA in 40-hpa.yaml owns the count (3 to 10).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reader
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reader
+    spec:
+      terminationGracePeriodSeconds: 30
+      # The Service "reader" would otherwise set READER_PORT=tcp://..., the variable the
+      # reader reads for its own port (see 30-writer.yaml).
+      enableServiceLinks: false
+      # The reader exits at startup if MySQL or Redis doesn't answer.
+      initContainers:
+        - name: wait-for-mysql-and-redis
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z -w 1 mysql 3306 && nc -z -w 1 redis 6379; do echo "waiting for mysql:3306 and redis:6379"; sleep 2; done
+      containers:
+        - name: reader
+          image: cdc-reader
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+          envFrom:
+            - configMapRef: { name: app-env }
+          env:
+            - name: MYSQL_USER
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_USER } }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_PASSWORD } }
+          resources:
+            requests: { cpu: "200m", memory: "320Mi" }
+            limits: { cpu: "1", memory: "768Mi" }
+          # Ready = can reach MySQL and Redis. Alive = answers HTTP at all, so a Redis
+          # outage takes readers out of the Service but never restarts them.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4

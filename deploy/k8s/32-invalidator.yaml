@@ -1,0 +1,64 @@
+# The invalidator: reads change events from Kafka and deletes the changed items' cache
+# keys in Redis. 3 pods in one consumer group share the topic's 6 partitions. Kafka keeps
+# the group's position (committed offsets), so the pods hold no state: a Deployment.
+#
+# No Service: nothing sends it requests. Its port only serves the probes and /metrics,
+# which are read pod by pod (a Service would pick a random pod per connection).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invalidator
+  labels:
+    app.kubernetes.io/name: invalidator
+spec:
+  replicas: 3
+  # Up to one extra and one missing pod during a restart, like the reference.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: invalidator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: invalidator
+    spec:
+      terminationGracePeriodSeconds: 30
+      # No Service of its own, but keep other Services' variables out too (see
+      # 30-writer.yaml).
+      enableServiceLinks: false
+      # The invalidator exits at startup if Kafka or Redis doesn't answer.
+      initContainers:
+        - name: wait-for-kafka-and-redis
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z -w 1 kafka 9092 && nc -z -w 1 redis 6379; do echo "waiting for kafka:9092 and redis:6379"; sleep 2; done
+      containers:
+        - name: invalidator
+          image: cdc-invalidator
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8082
+          envFrom:
+            - configMapRef: { name: app-env }
+          resources:
+            requests: { cpu: "150m", memory: "320Mi" }
+            limits: { cpu: "1", memory: "768Mi" }
+          # Ready means connected to Kafka and Redis, not "owns partitions": a pod beyond
+          # the partition count is Ready and idle.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 4

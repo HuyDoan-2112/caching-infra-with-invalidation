@@ -1,0 +1,10 @@
+# Everything this system runs lives in one namespace, so it can be removed in one step.
+# Pod Security: reject pods that ask for privileges (baseline), and log what the strictest
+# level (restricted) would reject.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cdc-cache-invalidation
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted

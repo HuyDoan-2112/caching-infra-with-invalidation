@@ -1,0 +1,26 @@
+# Settings every service reads from its environment, the same names as .env.example.
+# Host names are Service names in this namespace (mysql, redis, kafka), which cluster
+# DNS resolves to the right pods. Each service reads only the keys it needs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-env
+data:
+  # MySQL (writer, reader). Credentials are in 01-secret.yaml.
+  MYSQL_HOST: "mysql"
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: "catalog"
+  DB_MAX_OPEN_CONNS: "16"
+
+  # Redis (reader, invalidator)
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # Reader cache-aside
+  CACHE_TTL: "10m"
+  CACHE_LEASE_TTL: "2s"
+
+  # Invalidator
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  KAFKA_TOPIC: "cdc.catalog.items"
+  KAFKA_GROUP: "cache-invalidator"
