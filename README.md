@@ -97,6 +97,11 @@ return the old value for about 0.3s at p50 and 0.9s at p99. The invalidator also
 `/healthz`, `/readyz` and `/metrics`. `make up` starts the whole stack and registers the
 Debezium connector.
 
+One invalidator process runs `KAFKA_CONCURRENCY` Kafka clients (default 3), each its own
+member of the consumer group, so each owns its partitions alone. `KAFKA_BALANCER` picks how
+partitions are shared out when members come and go: `cooperative-sticky` (the default) only
+pauses the partitions that move, `range` pauses all of them.
+
 A reader that misses takes a short **fill lease** first (`v1:lease:{id}`, `CACHE_LEASE_TTL`,
 default 2s), and caches the row only if a Lua script finds its lease still in place. The
 invalidator deletes the lease together with the item key, so a reader that read the old row
@@ -117,7 +122,8 @@ pool's waits and timeouts on `/metrics`.
 The same system also runs on Kubernetes, in a local kind cluster with one control-plane
 node and two workers. MySQL, Kafka, Kafka Connect and Redis run as StatefulSets with their
 own disks. Two writers and three readers sit behind CPU autoscalers (2 to 6 and 3 to 10
-pods), three invalidators share the topic's 6 partitions, and ingress-nginx routes
+pods), three invalidator pods with 3 members each share the topic's 6 partitions (so 3
+members wait idle), and ingress-nginx routes
 `writer.cache.local` and `reader.cache.local` from the host's port 80.
 
 ## How to run

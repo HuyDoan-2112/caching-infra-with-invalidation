@@ -24,3 +24,10 @@ data:
   KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
   KAFKA_TOPIC: "cdc.catalog.items"
   KAFKA_GROUP: "cache-invalidator"
+  # Group members per invalidator pod: 3 pods x 3 = 9 members for 6 partitions, so 3
+  # stay idle, as in the reference.
+  KAFKA_CONCURRENCY: "3"
+  # cooperative-sticky, or range (eager: every rebalance pauses every partition). Kafka
+  # refuses a member that shares no balancer with the group (INCONSISTENT_GROUP_PROTOCOL),
+  # so during a rolling switch the new pods' members wait until the last old one leaves.
+  KAFKA_BALANCER: "cooperative-sticky"

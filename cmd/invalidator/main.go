@@ -5,17 +5,20 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/invalidator"
 	"github.com/HuyDoan-2112/cdc-cache-invalidation/internal/platform/config"
@@ -63,12 +66,27 @@ func run(log *slog.Logger) error {
 	}()
 	log.Info("redis connected", "addr", net.JoinHostPort(cfg.Redis.Host, cfg.Redis.Port))
 
-	cl, err := kafka.Open(ctx, cfg.Kafka)
-	if err != nil {
-		return err
+	// One client per group member: each owns its partitions alone,
+	// so Run and its commit logic don't change. Client IDs
+	// consumer-<group>-<n>.
+	clients := make([]*kgo.Client, 0, cfg.Kafka.Concurrency)
+	started := false
+	defer func() { // once the members start, each one closes its own client
+		if !started {
+			for _, cl := range clients {
+				cl.Close()
+			}
+		}
+	}()
+	for i := range cfg.Kafka.Concurrency {
+		cl, err := kafka.Open(ctx, cfg.Kafka, fmt.Sprintf("consumer-%s-%d", cfg.Kafka.Group, i+1))
+		if err != nil {
+			return err
+		}
+		clients = append(clients, cl)
 	}
-	defer cl.Close() // after Run returns: leaves the group so its partitions move at once
-	log.Info("kafka connected", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.Topic, "group", cfg.Kafka.Group)
+	log.Info("kafka connected", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.Topic, "group", cfg.Kafka.Group,
+		"members", cfg.Kafka.Concurrency, "balancer", cfg.Kafka.Balancer)
 
 	ln, err := net.Listen("tcp", ":"+cfg.HTTPPort)
 	if err != nil {
@@ -84,19 +102,37 @@ func run(log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	health.Register(mux, log,
-		health.Check{Name: "redis", Ping: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
-		health.Check{Name: "kafka", Ping: cl.Ping},
-	)
-	// The consumer and the HTTP server stop together: when either returns,
-	// cancel ends the other.
+	// No readiness checks, like the reference (Spring Boot's readiness group only
+	// says the app has started). Startup already failed if Redis or Kafka was
+	// unreachable, no Service sends the invalidator traffic, and a Redis outage
+	// is handled by retrying each DEL, not by taking pods out.
+	health.Register(mux, log)
+	// The members and the HTTP server stop together: when the server returns, or
+	// the last member does, cancel ends the rest.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	httpErr := make(chan error, 1)
 	go func() { httpErr <- httpserver.Run(ctx, ln, mux, log) }()
 
+	// One Handler for all members: it holds no state of its own, and the Redis
+	// pool and the metrics are safe to share between goroutines.
 	h := invalidator.NewHandler(invalidator.NewRedisDeleter(rdb), log, firstRetryWait, maxRetryWait, metrics)
-	runErr := invalidator.Run(ctx, cl, h, log)
+	runErrs := make([]error, len(clients))
+	var wg sync.WaitGroup
+	started = true
+	for i, cl := range clients {
+		wg.Go(func() {
+			mlog := log.With("member", i+1)
+			runErrs[i] = invalidator.Run(ctx, cl, h, mlog)
+			cl.Close() // leaves the group, so its partitions move at once
+			// Like Spring Kafka's containers, a member that stops on its own
+			// doesn't stop the others.
+			if ctx.Err() == nil {
+				mlog.Warn("member stopped, the others keep running", "err", runErrs[i])
+			}
+		})
+	}
+	wg.Wait()
 	cancel()
-	return errors.Join(runErr, <-httpErr)
+	return errors.Join(errors.Join(runErrs...), <-httpErr)
 }

@@ -18,7 +18,7 @@ deploy/k8s/
 ├── 20-redis.yaml              StatefulSet + headless Service + 1Gi disk, AOF and LRU as in Compose
 ├── 30-writer.yaml             Deployment + Service on :8080
 ├── 31-reader.yaml             Deployment + Service on :8081
-├── 32-invalidator.yaml        Deployment, 3 pods in one consumer group, no Service
+├── 32-invalidator.yaml        Deployment, 3 pods x 3 group members for 6 partitions, no Service
 ├── 40-hpa.yaml                CPU autoscalers: writer 2 to 6 pods, reader 3 to 10
 └── 99-ingress.yaml            ingress-nginx: writer.cache.local and reader.cache.local on port 80
 ```
