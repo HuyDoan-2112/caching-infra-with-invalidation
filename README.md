@@ -35,7 +35,7 @@ even if the writer crashed right after.
                                                             │
                                                             ▼
                                                        invalidator ──── DEL v1:item:{id} ───┐
-                                                         (:8090)                            │
+                                                         (:8082)                            │
                                                                                             ▼
  client ◀───────────────────────────── reader ◀──── cache hit ──────────────────────────  Redis
           GET /api/v1/items/{id}       (:8081)
@@ -66,14 +66,16 @@ cdc-cache-invalidation/
 │   └── loadgen/          Open-loop load generator for the writer and reader
 ├── internal/             Shared Go packages used by the programs above
 │                         (Go forbids importing these from outside this module)
-├── deploy/               Docker Compose and infrastructure config
+├── deploy/               Docker Compose, Kubernetes and infrastructure config
 │   ├── docker-compose.yml
-│   └── mysql/            MySQL image with binlog settings, and the schema
+│   ├── k8s/              Kustomize manifests for a local kind cluster, with their own README
+│   ├── connect/          Debezium connector config, shared by Compose and kind
+│   └── mysql/            MySQL image with the binlog settings and the schema built in
 ├── docs/
 │   └── adr/              Architecture Decision Records: why each design choice was made
 ├── .github/workflows/    CI: `make check` and a Compose smoke test
 ├── Dockerfile            Builds any program: --build-arg SERVICE=writer|reader|invalidator
-├── Makefile              Developer commands: check, up, down, run-writer, tools
+├── Makefile              Developer commands: check, up, down, kind-up, k8s-up, tools
 ├── go.mod                Go module definition
 └── README.md
 ```
@@ -112,6 +114,12 @@ default 80/10/10 mix, writes are the first limit, at about 1,000 commits a secon
 between 6,000 and 8,000 req/s, when every CPU is busy. The reader also exports its Redis
 pool's waits and timeouts on `/metrics`.
 
+The same system also runs on Kubernetes, in a local kind cluster with one control-plane
+node and two workers. MySQL, Kafka, Kafka Connect and Redis run as StatefulSets with their
+own disks. Two writers and three readers sit behind CPU autoscalers (2 to 6 and 3 to 10
+pods), three invalidators share the topic's 6 partitions, and ingress-nginx routes
+`writer.cache.local` and `reader.cache.local` from the host's port 80.
+
 ## How to run
 
 Prerequisites: Go 1.27+, Docker with Compose v2, make.
@@ -141,6 +149,49 @@ go run ./cmd/loadgen -h                                  # every flag and its de
 go run ./cmd/loadgen -rate=2000 -duration=30s            # 10s warmup, then 30s measured
 go run ./cmd/loadgen -rate=2000 -dist=zipf -window=10s   # hot items; p99 per 10s window
 ```
+
+### Kubernetes (kind)
+
+Prerequisites: [kind](https://kind.sigs.k8s.io/) v0.33+, kubectl, and the host's port 80 free.
+
+```bash
+make kind-up       # kind cluster (1 control plane + 2 workers, host :80 mapped), ingress-nginx, metrics-server
+make k8s-images    # build the four images: MySQL with the schema, writer, reader, invalidator
+make k8s-load      # copy them into the kind nodes, so no registry is needed
+make k8s-up        # kubectl apply -k deploy/k8s, wait for every rollout and the connector Job
+```
+
+What each manifest does, the start order and the day-to-day commands are in
+[deploy/k8s/README.md](deploy/k8s/README.md).
+
+From no cluster to a running system takes about 4 minutes on one machine. Point the two
+host names at the ingress, then run the same round trip as with Compose:
+
+```bash
+echo "127.0.0.1 writer.cache.local reader.cache.local" | sudo tee -a /etc/hosts
+
+curl -s -X POST http://writer.cache.local/api/v1/items \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"widget","description":"shiny","price_cents":1999,"currency":"USD","stock":7}'
+curl -si http://reader.cache.local/api/v1/items/1 | grep -i x-cache   # MISS, now cached
+curl -si http://reader.cache.local/api/v1/items/1 | grep -i x-cache   # HIT
+curl -s -X PUT http://writer.cache.local/api/v1/items/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"widget v2","description":"shinier","price_cents":2499,"currency":"USD","stock":5}'
+curl -si http://reader.cache.local/api/v1/items/1 | grep -i x-cache   # MISS: the invalidator deleted the key
+```
+
+After rebuilding an image, run `make k8s-images k8s-load`, then
+`kubectl rollout restart deploy/<name>`: the tag is still `dev`, so the pods don't restart
+on their own.
+
+```bash
+make k8s-down      # delete the namespace and everything in it, data included
+make kind-down     # delete the cluster
+```
+
+ingress-nginx is retired: its maintainers stopped releasing it in March 2026. `kind-up` pins
+its last release, controller-v1.15.1. Its successor is the Gateway API.
 
 ## Acknowledgements
 

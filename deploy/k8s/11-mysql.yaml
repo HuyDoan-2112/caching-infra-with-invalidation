@@ -1,0 +1,90 @@
+# MySQL: one pod with its own disk, plus a headless Service that gives it the DNS name
+# "mysql". The image is our cdc-mysql, with my.cnf (ROW binlog, GTIDs) and the schema
+# baked in, the same image Compose runs. Load it first:
+#   kind load docker-image cdc-mysql:8.4 --name cdc-cache-invalidation
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  labels:
+    app.kubernetes.io/name: mysql
+spec:
+  # Headless: no virtual IP. "mysql" resolves straight to the pod's IP, and only while
+  # the pod is Ready.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  labels:
+    app.kubernetes.io/name: mysql
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mysql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mysql
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: mysql
+          image: cdc-mysql:8.4
+          # The image exists only inside the kind nodes; never try a registry.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: mysql
+              containerPort: 3306
+          # Only the variables the MySQL image reads on its first start.
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_ROOT_PASSWORD } }
+            - name: MYSQL_USER
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_USER } }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_PASSWORD } }
+            - name: MYSQL_DATABASE
+              valueFrom: { configMapKeyRef: { name: app-env, key: MYSQL_DATABASE } }
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "1", memory: "1Gi" }
+          # Ready only once the real server listens on TCP. During the first start the
+          # entrypoint runs the schema on a temporary server with networking off, so
+          # this fails until the schema is in.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+  # One PersistentVolumeClaim per pod (data-mysql-0). It outlives the pod, so a restart
+  # keeps the data and the binlog, which Debezium's saved position points into.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

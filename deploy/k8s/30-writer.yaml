@@ -1,0 +1,87 @@
+# The writer: 2 identical pods behind one Service. Pods have no state of their own (the
+# data is in MySQL), so this is a Deployment, not a StatefulSet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: writer
+  labels:
+    app.kubernetes.io/name: writer
+spec:
+  # A normal Service: one virtual IP for "writer", and kube-proxy picks one of the
+  # pods behind it for each new connection.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: writer
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: writer
+  labels:
+    app.kubernetes.io/name: writer
+spec:
+  # No replicas: here. The HPA in 40-hpa.yaml owns the count (2 to 6); a number here
+  # would reset it to 2 on every kubectl apply.
+  # A restart replaces one pod at a time: start a new one (surge 1), wait until it is
+  # Ready, then stop an old one (unavailable 0), so capacity never drops below 2.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: writer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: writer
+    spec:
+      terminationGracePeriodSeconds: 30
+      # Kubernetes otherwise adds <SERVICE>_PORT=tcp://<ip>:<port> (and more) for every
+      # Service in the namespace. The Service "writer" would set WRITER_PORT, the variable
+      # our code reads for its own port, and the writer would exit at startup.
+      enableServiceLinks: false
+      # The writer exits at startup if MySQL doesn't answer. Waiting here keeps it out
+      # of the restart backoff (10s, 20s, 40s, ... up to 5 minutes) on a cold start.
+      initContainers:
+        - name: wait-for-mysql
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - until nc -z -w 1 mysql 3306; do echo "waiting for mysql:3306"; sleep 2; done
+      containers:
+        - name: writer
+          # The tag comes from images: in kustomization.yaml.
+          image: cdc-writer
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef: { name: app-env }
+          env:
+            - name: MYSQL_USER
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_USER } }
+            - name: MYSQL_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: MYSQL_PASSWORD } }
+          resources:
+            requests: { cpu: "150m", memory: "320Mi" }
+            limits: { cpu: "1", memory: "768Mi" }
+          # Ready = can reach MySQL (/readyz pings it). Alive = the process answers HTTP
+          # at all (/healthz checks nothing), so a MySQL outage never restarts writers.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4

@@ -1,0 +1,21 @@
+# Local kind cluster: 1 control plane + 2 workers, each a Docker container on this machine.
+# The host's :80 and :443 go to the control-plane node, where ingress-nginx listens, so
+# http://writer.cache.local works without port-forwarding.
+#   kind create cluster --config deploy/k8s/kind-cluster.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cdc-cache-invalidation
+nodes:
+  - role: control-plane
+    # ingress-nginx's kind manifest runs its controller only on a node with this label.
+    labels:
+      ingress-ready: "true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+  - role: worker
+  - role: worker

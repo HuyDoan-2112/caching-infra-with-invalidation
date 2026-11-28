@@ -1,0 +1,12 @@
+# Turns catalog-items.json into a ConfigMap for the cluster, so Compose (make connector)
+# and kind register the connector from the same file. deploy/k8s includes this folder.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: debezium-connector
+    files:
+      - catalog-items.json
+    options:
+      # Keep the plain name: the Job below mounts "debezium-connector".
+      disableNameSuffixHash: true

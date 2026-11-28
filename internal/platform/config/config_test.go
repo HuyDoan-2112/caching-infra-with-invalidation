@@ -86,7 +86,7 @@ func TestLoadKafkaBrokers(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "unset uses the default", env: "", want: []string{"localhost:9092"}},
-		{name: "one broker", env: "kafka:29092", want: []string{"kafka:29092"}},
+		{name: "one broker", env: "kafka:9092", want: []string{"kafka:9092"}},
 		{name: "several, with spaces", env: "a:9092, b:9092", want: []string{"a:9092", "b:9092"}},
 		{name: "trailing comma", env: "a:9092,", want: []string{"a:9092"}},
 		{name: "only commas", env: ",", wantErr: true},
